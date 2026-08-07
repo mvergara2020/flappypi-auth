@@ -7,6 +7,18 @@ binding = "DB"
 database_name = "flappypi"
 database_id = "6bcb42bd-529f-4af5-bd4d-882c4e91790b"
 
+[[queues.producers]]
+binding = "GAME_POINTS_QUEUE"
+queue = "flappypi-game-points"
+
+[[queues.consumers]]
+queue = "flappypi-game-points"
+max_batch_size = 100
+max_batch_timeout = 20
+max_retries = 10
+max_concurrency = 1
+dead_letter_queue = "flappypi-game-points-dlq"
+
 [vars]
 ENV = "dev"
 
@@ -29,3 +41,15 @@ ENV = "qa"
 binding = "DB"
 database_name = "flappypi_qa"
 database_id = "efcadca4-7074-42ae-b1e2-8595073e5d55"
+
+[[env.qa.queues.producers]]
+binding = "GAME_POINTS_QUEUE"
+queue = "flappypi-game-points-qa"
+
+[[env.qa.queues.consumers]]
+queue = "flappypi-game-points-qa"
+max_batch_size = 100
+max_batch_timeout = 20
+max_retries = 10
+max_concurrency = 1
+dead_letter_queue = "flappypi-game-points-qa-dlq"
