@@ -282,7 +282,7 @@ const BIRD_SHIELDS = {
 };
 //const FREE_EGG_COOLDOWN = 8 * 60 * 60 * 1000; // 8 horas
 const LEVEL_TARGET = 100; //total tubos
-const MAX_LEVEL_CAP = 50; //ACTUALIZAR PRODUCCION
+const MAX_LEVEL_CAP = 999;
 const MIN_BASE_SEC = 5;
 const MIN_SEC_PER_PIPE = 0.35;
 const MAX_SCORE_PER_SEC = 3;
@@ -327,7 +327,7 @@ const GAME_DEFINITIONS = Object.freeze({
   flappy_classic: makeGame({
     ...FLAPPY_PIPE_RULES,
     scoringVersion: "flappy-pipes-v1",
-    maxLevel: 50,
+    maxLevel: 999,
     specialLevels: [0, 99999],
     completionValidator: "flappy_pipes",
     levelProgression: true,
@@ -337,7 +337,7 @@ const GAME_DEFINITIONS = Object.freeze({
   webcam_flappy: makeGame({
     ...FLAPPY_PIPE_RULES,
     scoringVersion: "webcam-flappy-pipes-v1",
-    maxLevel: 50,
+    maxLevel: 999,
     specialLevels: [0, 99999],
     completionValidator: "flappy_pipes",
     levelProgression: true,
@@ -1395,7 +1395,7 @@ const MAX_STEAL = 75;
 
 let DEV_PIPE_GAP = 1.04; //DEJAR EN 1 PARA PRODUCCIÓN ....
 
-const LEVEL_DEFINITION = {
+const FLAPPY_STAGE_TEMPLATES = {
   0:  { mode: "normal", label: "∞", isInfinity: true , pipes_target: 100},
   1:  { mode: "normal", estrecho: 0.84*DEV_PIPE_GAP , pipes_target: 25},
   2:  { mode: "normal", estrecho: 0.84*DEV_PIPE_GAP , pipes_target: 25},
@@ -1463,6 +1463,34 @@ const LEVEL_DEFINITION = {
     baby: true          // flag especial
   }
 };
+
+/* =========================================================
+   FLAPPY CLASSIC - 999 STAGES
+   STAGE N requires N real pipes / N official PTS.
+   Mechanics reuse the original 50-stage templates cyclically.
+========================================================= */
+function buildFlappyClassicStages(maxStage = 999) {
+  const stages = {};
+
+  for (let stage = 1; stage <= maxStage; stage++) {
+    const templateStage = ((stage - 1) % 50) + 1;
+    const template = FLAPPY_STAGE_TEMPLATES[templateStage] || FLAPPY_STAGE_TEMPLATES[1];
+
+    stages[stage] = Object.freeze({
+      ...template,
+      pipes_target: stage,
+      stage_id: stage,
+      template_stage: templateStage
+    });
+  }
+
+  stages[0] = Object.freeze({ ...FLAPPY_STAGE_TEMPLATES[0] });
+  stages[99999] = Object.freeze({ ...FLAPPY_STAGE_TEMPLATES[99999] });
+
+  return Object.freeze(stages);
+}
+
+const LEVEL_DEFINITION = buildFlappyClassicStages(999);
 
 function getEffectivePiAmount(amount, env) {
   if (env.ENV === "dev" || env.ENV === "qa") {
@@ -2050,7 +2078,7 @@ if (!Number.isInteger(realPipesPassed) || realPipesPassed < target) {
   const durationSec = calcDurationSec(payload.startedAt);
 
   // ✅ mínimo dinámico según target real del nivel
-  const minDurationSec = Math.max(MIN_BASE_SEC, target * MIN_SEC_PER_PIPE);
+  const minDurationSec = Math.max(Math.min(MIN_BASE_SEC, target), target * MIN_SEC_PER_PIPE);
 
   if (durationSec < minDurationSec) {
     return {
