@@ -1,0 +1,31 @@
+name = "flappypi-auth"
+main = "worker.js"
+compatibility_date = "2024-01-01"
+
+[[d1_databases]]
+binding = "DB"
+database_name = "flappypi"
+database_id = "6bcb42bd-529f-4af5-bd4d-882c4e91790b"
+
+[vars]
+ENV = "dev"
+
+
+# ================================
+# ENVIRONMENT: QA
+# ================================
+[env.qa]
+name = "flappypi-auth-qa"
+routes = [
+  { pattern = "qa.auth.flappypi.com/*", zone_name = "flappypi.com" }
+]
+
+# Variables públicas QA
+[env.qa.vars]
+ENV = "qa"
+
+# Base de datos QA
+[[env.qa.d1_databases]]
+binding = "DB"
+database_name = "flappypi_qa"
+database_id = "efcadca4-7074-42ae-b1e2-8595073e5d55"
