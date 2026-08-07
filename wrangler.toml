@@ -22,7 +22,6 @@ dead_letter_queue = "flappypi-game-points-dlq"
 [vars]
 ENV = "dev"
 
-
 # ================================
 # ENVIRONMENT: QA
 # ================================
@@ -32,11 +31,9 @@ routes = [
   { pattern = "qa.auth.flappypi.com/*", zone_name = "flappypi.com" }
 ]
 
-# Variables públicas QA
 [env.qa.vars]
 ENV = "qa"
 
-# Base de datos QA
 [[env.qa.d1_databases]]
 binding = "DB"
 database_name = "flappypi_qa"
