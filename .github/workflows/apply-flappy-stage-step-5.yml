@@ -1,0 +1,56 @@
+name: Apply Flappy stage step 5
+
+on:
+  push:
+    branches:
+      - agent/flappy-game-points-queue-fix
+    paths:
+      - .github/workflows/apply-flappy-stage-step-5.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/flappy-game-points-queue-fix
+
+      - name: Set STAGE target to stage x 5
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("worker.js")
+          source = path.read_text()
+
+          old = "pipes_target: stage,"
+          new = "pipes_target: stage * 5,"
+          if old not in source:
+              raise SystemExit("Expected pipes_target: stage, not found")
+          source = source.replace(old, new, 1)
+
+          source = source.replace(
+              "STAGE N requires N real pipes / N official PTS.",
+              "STAGE N requires N * 5 real pipes / official PTS.",
+              1,
+          )
+
+          path.write_text(source)
+          PY
+
+      - name: Validate Worker syntax
+        run: node --check worker.js
+
+      - name: Commit change
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add worker.js
+          git diff --cached --quiet && exit 0
+          git commit -m "Set Flappy stage goals to multiples of five"
+          git push origin HEAD:agent/flappy-game-points-queue-fix
