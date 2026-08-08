@@ -12,7 +12,7 @@ const COINGECKO_PRICE_URL =
   "&precision=full";
 
 const SHARED_CACHE_KEY =
-  "https://cache.flappypi.internal/shop/pi-usd-v3";
+  "https://cache.flappypi.internal/shop/pi-usd-v4";
 
 const CATALOG_VERSION = "2026-07-fixed-v1";
 const RECOMMENDED_PACK_ID = "PI_2";
@@ -159,7 +159,10 @@ async function fetchWithTimeout(url, options, timeoutMs) {
 
 async function fetchPiPriceFromCoinGecko(env) {
   const apiKey = String(env?.COINGECKO_DEMO_API_KEY || "").trim();
-  const headers = { "Accept": "application/json" };
+  const headers = {
+    "Accept": "application/json",
+    "User-Agent": "FlappyPi/1.0 (+https://flappypi.com; Cloudflare Worker)"
+  };
 
   if (apiKey) {
     headers["x-cg-demo-api-key"] = apiKey;
