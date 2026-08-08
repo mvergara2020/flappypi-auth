@@ -1,0 +1,66 @@
+name: Apply game photo backend
+
+on:
+  push:
+    branches:
+      - agent/flappy-game-points-queue-fix
+    paths:
+      - .github/workflows/apply-game-photo-backend.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/flappy-game-points-queue-fix
+
+      - name: Patch Worker photo route and rewards
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('worker.js')
+          source = path.read_text()
+
+          import_line = 'import { routeGamePhoto } from "./game-photo.worker.js";\n'
+          anchor = 'import { routeDailyRewards } from "./daily-rewards.worker.js";\n'
+          if import_line not in source:
+              if anchor not in source:
+                  raise SystemExit('daily rewards import anchor not found')
+              source = source.replace(anchor, anchor + import_line, 1)
+
+          route_anchor = '''    if (dailyRewardResponse) {\n      return dailyRewardResponse;\n    }\n'''
+          route_block = '''    if (dailyRewardResponse) {\n      return dailyRewardResponse;\n    }\n\n    const gamePhotoResponse = await routeGamePhoto(\n      request,\n      env,\n      { requireUser, corsHeaders, normalizeGameId }\n    );\n\n    if (gamePhotoResponse) {\n      return gamePhotoResponse;\n    }\n'''
+          if 'const gamePhotoResponse = await routeGamePhoto(' not in source:
+              if route_anchor not in source:
+                  raise SystemExit('daily rewards route anchor not found')
+              source = source.replace(route_anchor, route_block, 1)
+
+          old = '    levelRewardEnabled: true\n  }),'
+          count = source.count(old)
+          if count < 2:
+              raise SystemExit(f'expected two Flappy reward flags, found {count}')
+          source = source.replace(old, '    levelRewardEnabled: false\n  }),', 2)
+
+          path.write_text(source)
+          PY
+
+      - name: Validate Worker modules
+        run: |
+          node --check worker.js
+          node --check game-photo.worker.js
+
+      - name: Commit backend
+        shell: bash
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add worker.js
+          git diff --cached --quiet && exit 0
+          git commit -m "Add shared stage photo storage"
+          git push origin HEAD:agent/flappy-game-points-queue-fix
