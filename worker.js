@@ -4,6 +4,7 @@ import {
   RANK_LEVELS
 } from "./levels.js";
 import { routeDailyRewards } from "./daily-rewards.worker.js";
+import { routeGamePhoto } from "./game-photo.worker.js";
 
 //const FRONTEND_ORIGIN = "http://localhost:3000";
 const FRONTEND_ORIGIN = "http://192.168.1.81:3000";
@@ -331,7 +332,7 @@ const GAME_DEFINITIONS = Object.freeze({
     specialLevels: [0, 99999],
     completionValidator: "flappy_pipes",
     levelProgression: true,
-    levelRewardEnabled: true
+    levelRewardEnabled: false
   }),
 
   webcam_flappy: makeGame({
@@ -341,7 +342,7 @@ const GAME_DEFINITIONS = Object.freeze({
     specialLevels: [0, 99999],
     completionValidator: "flappy_pipes",
     levelProgression: true,
-    levelRewardEnabled: true
+    levelRewardEnabled: false
   }),
 
   flappypi_999: makeGame({
@@ -2377,6 +2378,16 @@ export default {
   
     if (dailyRewardResponse) {
       return dailyRewardResponse;
+    }
+
+    const gamePhotoResponse = await routeGamePhoto(
+      request,
+      env,
+      { requireUser, corsHeaders, normalizeGameId }
+    );
+
+    if (gamePhotoResponse) {
+      return gamePhotoResponse;
     }
     /* =========================
        HEALTH
