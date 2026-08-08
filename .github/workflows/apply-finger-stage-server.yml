@@ -2,10 +2,10 @@ name: Apply Finger Trace stage server
 on:
   push:
     branches: [agent/flappy-game-points-queue-fix]
-    paths:
-      - .github/workflows/apply-finger-stage-server.yml
+  workflow_dispatch:
 jobs:
   apply:
+    if: github.actor != 'flappypi-agent'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -150,6 +150,15 @@ function validateFingerCompleteAttempt({ payload, body }) {
               1
           )
           photo.write_text(ptext)
+
+          platform = Path('platform.worker.js')
+          platform_text = platform.read_text()
+          platform_text = platform_text.replace(
+              'const apiKey = safeText(env.PI_API_KEY, 300);',
+              'const apiKey = safeText(env.PI_SERVER_API_KEY || env.PI_API_KEY, 300);',
+              1
+          )
+          platform.write_text(platform_text)
       - name: Syntax check
         run: |
           node --check worker.js
@@ -159,7 +168,7 @@ function validateFingerCompleteAttempt({ payload, body }) {
         run: |
           git config user.name "flappypi-agent"
           git config user.email "actions@users.noreply.github.com"
-          git add worker.js game-photo.worker.js
+          git add worker.js game-photo.worker.js platform.worker.js
           if git diff --cached --quiet; then
             echo "No server changes"
             exit 0
