@@ -2,6 +2,13 @@ const PI_USD_FALLBACK = 0.07499;
 const CATALOG_VERSION = "2026-07-fixed-v1";
 const RECOMMENDED_PACK_ID = "PI_2";
 
+const ALLOWED_ORIGINS = new Set([
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://192.168.1.81:3000",
+  "https://192.168.1.81:3000"
+]);
+
 const PACKS = Object.freeze([
   { id:"PI_0_5", product_code:"FC_3000", name:"STARTER", usd_cents:10, coins:3000, spins:1, badge:"TRY IT", featured:false, compare_to:null, group:"main", sort:10 },
   { id:"PI_1", product_code:"FC_7000", name:"SMALL", usd_cents:20, coins:7000, spins:3, badge:null, featured:false, compare_to:"PI_0_5", group:"main", sort:20 },
@@ -13,14 +20,27 @@ const PACKS = Object.freeze([
   { id:"PI_100", product_code:"FC_1000000", name:"MAX", usd_cents:1400, coins:1000000, spins:60, badge:"MAX VALUE", featured:false, compare_to:"PI_50", group:"max", sort:80 }
 ]);
 
-function json(body, status = 200) {
+function responseHeaders(request) {
+  const headers = {
+    "Content-Type": "application/json; charset=utf-8",
+    "Cache-Control": "no-store, no-cache, must-revalidate",
+    "Pragma": "no-cache"
+  };
+
+  const origin = request?.headers?.get?.("Origin") || "";
+  if (ALLOWED_ORIGINS.has(origin)) {
+    headers["Access-Control-Allow-Origin"] = origin;
+    headers["Access-Control-Allow-Credentials"] = "true";
+    headers["Vary"] = "Origin";
+  }
+
+  return headers;
+}
+
+function json(request, body, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
-    headers: {
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store, no-cache, must-revalidate",
-      "Pragma": "no-cache"
-    }
+    headers: responseHeaders(request)
   });
 }
 
@@ -99,7 +119,7 @@ export function routeLocalFastShop(request, env, url = new URL(request.url)) {
   if (env?.ENV !== "dev" || request.method !== "GET") return null;
 
   if (url.pathname === "/shop/flappycoin/pi-price") {
-    return json({
+    return json(request, {
       ok: true,
       currency: "USD",
       pi_price: PI_USD_FALLBACK,
@@ -119,7 +139,7 @@ export function routeLocalFastShop(request, env, url = new URL(request.url)) {
     url.pathname === "/shop/flappycoin/prices" ||
     url.pathname === "/shop/catalog"
   ) {
-    return json(buildCatalog());
+    return json(request, buildCatalog());
   }
 
   return null;
