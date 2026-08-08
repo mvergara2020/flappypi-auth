@@ -10,6 +10,11 @@ const STAGE_STAR_GAMES = new Set([
   "webcam_flappy"
 ]);
 
+/*
+  This lazy CREATE keeps local development zero-setup. Before QA/prod
+  rollout this same table should be moved into the normal D1 migration
+  path; CREATE IF NOT EXISTS is intentionally safe in the meantime.
+*/
 let stageStarSchemaPromise = null;
 
 function json(data, status, request, corsHeaders) {
