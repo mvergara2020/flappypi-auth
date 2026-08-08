@@ -5,11 +5,6 @@ const PHOTO_CONTENT_TYPES = new Map([
   ["image/webp", "webp"]
 ]);
 
-/*
-  Only games with server-authoritative stage progression may mint
-  global stars. The endpoint is generic and more games can be added
-  here as their completion flow becomes server-authoritative.
-*/
 const STAGE_STAR_GAMES = new Set([
   "flappy_classic",
   "webcam_flappy"
@@ -90,6 +85,38 @@ async function routeStageStars(request, env, helpers, url) {
 
   await ensureStageStarSchema(env);
 
+  /* A retry returns the exact reward already minted, never recalculating it. */
+  const existing = await env.DB.prepare(`
+    SELECT stars, performance, attempts, level_id, game_type, applied_at
+    FROM game_stage_star_rewards
+    WHERE game_uid = ?
+      AND user_id = ?
+    LIMIT 1
+  `).bind(gameUid, user.id).first();
+
+  if (existing?.applied_at) {
+    const totals = await env.DB.prepare(`
+      SELECT COALESCE(total_score, 0) AS total_score,
+             COALESCE(tops_season_score, 0) AS tops_season_score
+      FROM users
+      WHERE id = ?
+    `).bind(user.id).first();
+
+    return json({
+      ok: true,
+      game_uid: gameUid,
+      game_type: existing.game_type,
+      stage: Number(existing.level_id || 0),
+      stars: Number(existing.stars || 0),
+      performance: existing.performance || "CLEARED",
+      attempts: Number(existing.attempts || 1),
+      total_score: Number(totals?.total_score || 0),
+      tops_season_score: Number(totals?.tops_season_score || 0),
+      applied: true,
+      duplicate: true
+    }, 200, request, corsHeaders);
+  }
+
   const gameRow = await env.DB.prepare(`
     SELECT game_uid, game_type, level_id, mode, created_at
     FROM games
@@ -121,12 +148,6 @@ async function routeStageStars(request, env, helpers, url) {
   `).bind(user.id, gameType).first();
 
   const maxUnlocked = Number(progress?.max_level_unlocked || 1);
-
-  /*
-    A completed normal stage must have advanced the authoritative
-    server unlock beyond that stage. This prevents a failed run from
-    minting stars just because it has a games row.
-  */
   if (!(maxUnlocked > stage)) {
     return json({
       ok: false,
@@ -179,10 +200,6 @@ async function routeStageStars(request, env, helpers, url) {
     now
   ).run();
 
-  /*
-    Idempotent application: only a reward row whose applied_at is NULL
-    can change global stars. D1 batch executes these writes atomically.
-  */
   await env.DB.batch([
     env.DB.prepare(`
       UPDATE users
@@ -235,9 +252,8 @@ async function routeStageStars(request, env, helpers, url) {
     `).bind(gameUid, user.id).first(),
 
     env.DB.prepare(`
-      SELECT
-        COALESCE(total_score, 0) AS total_score,
-        COALESCE(tops_season_score, 0) AS tops_season_score
+      SELECT COALESCE(total_score, 0) AS total_score,
+             COALESCE(tops_season_score, 0) AS tops_season_score
       FROM users
       WHERE id = ?
     `).bind(user.id).first()
@@ -253,7 +269,8 @@ async function routeStageStars(request, env, helpers, url) {
     attempts: Number(reward?.attempts || attempts),
     total_score: Number(totals?.total_score || 0),
     tops_season_score: Number(totals?.tops_season_score || 0),
-    applied: Number(reward?.applied_at || 0) > 0
+    applied: Number(reward?.applied_at || 0) > 0,
+    duplicate: false
   }, 200, request, corsHeaders);
 }
 
@@ -274,9 +291,7 @@ export async function routeGamePhoto(request, env, helpers = {}) {
 
   if (request.method === "POST" && url.pathname === "/game/photo") {
     const user = await requireUser(request, env);
-    if (!user) {
-      return new Response("Unauthorized", { status: 401, headers: corsHeaders(request) });
-    }
+    if (!user) return new Response("Unauthorized", { status: 401, headers: corsHeaders(request) });
 
     if (!env.GAME_PHOTOS || typeof env.GAME_PHOTOS.put !== "function") {
       return json({ ok: false, code: "PHOTO_STORAGE_NOT_CONFIGURED" }, 503, request, corsHeaders);
@@ -284,9 +299,7 @@ export async function routeGamePhoto(request, env, helpers = {}) {
 
     const contentType = String(request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
     const ext = PHOTO_CONTENT_TYPES.get(contentType);
-    if (!ext) {
-      return json({ ok: false, code: "PHOTO_TYPE_NOT_ALLOWED" }, 415, request, corsHeaders);
-    }
+    if (!ext) return json({ ok: false, code: "PHOTO_TYPE_NOT_ALLOWED" }, 415, request, corsHeaders);
 
     const declaredLength = Number(request.headers.get("Content-Length") || 0);
     if (declaredLength > MAX_PHOTO_BYTES) {
@@ -307,10 +320,7 @@ export async function routeGamePhoto(request, env, helpers = {}) {
     const createdAt = Date.now();
 
     await env.GAME_PHOTOS.put(key, bytes, {
-      httpMetadata: {
-        contentType,
-        cacheControl: "public, max-age=31536000, immutable"
-      },
+      httpMetadata: { contentType, cacheControl: "public, max-age=31536000, immutable" },
       customMetadata: {
         owner_user_id: safeText(user.id, 120),
         game_type: safeText(gameType, 64),
@@ -345,10 +355,7 @@ export async function routeGamePhoto(request, env, helpers = {}) {
     headers.set("Cache-Control", "public, max-age=31536000, immutable");
     headers.set("X-Content-Type-Options", "nosniff");
 
-    return new Response(request.method === "HEAD" ? null : object.body, {
-      status: 200,
-      headers
-    });
+    return new Response(request.method === "HEAD" ? null : object.body, { status: 200, headers });
   }
 
   return null;
