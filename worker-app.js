@@ -1,4 +1,5 @@
 import coreWorker from "./worker-entry.js";
+import { routeInternalAds } from "./ads-internal.worker.js";
 
 const EXTRA_ALLOWED_ORIGINS = new Set([
   "http://localhost:3000",
@@ -291,6 +292,9 @@ export default {
   async fetch(request, env, ctx) {
     const runtimeEnv = normalizedEnv(env);
     const sourceUrl = new URL(request.url);
+
+    const adResponse = await routeInternalAds(request, runtimeEnv, sourceUrl);
+    if (adResponse) return withCors(request, adResponse);
 
     const languageResponse = await routeLanguagePreference(request, runtimeEnv, ctx, sourceUrl);
     if (languageResponse) return languageResponse;
