@@ -9,6 +9,13 @@ const EXTRA_ALLOWED_ORIGINS = new Set([
   "https://classic.flappypi.com"
 ]);
 
+const SUPPORTED_LANGUAGES = new Set([
+  "en", "es", "zh-CN", "zh-TW", "ko", "vi", "id",
+  "hi", "pt-BR", "fr", "tr", "ar", "fil"
+]);
+
+let languageSchemaPromise = null;
+
 function withCors(request, response) {
   const origin = request.headers.get("Origin");
   if (!origin || !EXTRA_ALLOWED_ORIGINS.has(origin)) return response;
@@ -38,11 +45,6 @@ function json(request, body, status = 200) {
 function normalizedEnv(env) {
   if (env.PI_API_KEY || !env.PI_SERVER_API_KEY) return env;
 
-  /*
-    Proxy preserves D1/R2/Queue bindings exactly as Cloudflare supplied
-    them while exposing the existing server key under the generic name
-    expected by the season payment module.
-  */
   return new Proxy(env, {
     get(target, property, receiver) {
       if (property === "PI_API_KEY") return target.PI_SERVER_API_KEY;
@@ -54,13 +56,186 @@ function normalizedEnv(env) {
 function rewriteAlias(request) {
   const url = new URL(request.url);
 
-  /* Frontend platform layer uses a compact generic alias. */
   if (request.method === "GET" && url.pathname === "/shop/catalog") {
     url.pathname = "/shop/flappycoin/catalog";
     return new Request(url.toString(), request);
   }
 
   return request;
+}
+
+function ensureLanguageSchema(env) {
+  if (languageSchemaPromise) return languageSchemaPromise;
+
+  languageSchemaPromise = env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS user_language_preferences (
+      user_id TEXT PRIMARY KEY,
+      language TEXT NOT NULL,
+      updated_at INTEGER NOT NULL
+    )
+  `).run().catch(error => {
+    languageSchemaPromise = null;
+    throw error;
+  });
+
+  return languageSchemaPromise;
+}
+
+function normalizeLanguage(value) {
+  const raw = String(value || "").trim();
+  if (!raw || raw.toLowerCase() === "auto") return null;
+
+  const normalized = raw.replace(/_/g, "-");
+  const lower = normalized.toLowerCase();
+
+  if (lower === "zh" || lower === "zh-cn" || lower === "zh-hans" || lower.startsWith("zh-hans-")) return "zh-CN";
+  if (lower === "zh-tw" || lower === "zh-hk" || lower === "zh-hant" || lower.startsWith("zh-hant-")) return "zh-TW";
+  if (lower === "pt" || lower === "pt-br" || lower.startsWith("pt-br-")) return "pt-BR";
+  if (lower === "fil" || lower === "tl" || lower.startsWith("fil-") || lower.startsWith("tl-")) return "fil";
+
+  const base = lower.split("-")[0];
+  const simple = ["en", "es", "ko", "vi", "id", "hi", "fr", "tr", "ar"];
+  if (simple.includes(base)) return base;
+
+  return null;
+}
+
+async function getCoreUser(request, env, ctx) {
+  const url = new URL(request.url);
+  url.pathname = "/me";
+  url.search = "?lvl_loaded=1";
+
+  const meRequest = new Request(url.toString(), {
+    method: "GET",
+    headers: request.headers
+  });
+
+  const response = await coreWorker.fetch(meRequest, env, ctx);
+  if (!response.ok) return null;
+  return await response.json().catch(() => null);
+}
+
+async function getSavedLanguage(env, userId) {
+  if (!userId) return null;
+  await ensureLanguageSchema(env);
+
+  const row = await env.DB.prepare(`
+    SELECT language
+    FROM user_language_preferences
+    WHERE user_id = ?
+    LIMIT 1
+  `).bind(String(userId)).first();
+
+  return SUPPORTED_LANGUAGES.has(String(row?.language || "")) ? String(row.language) : null;
+}
+
+async function saveLanguage(env, userId, language) {
+  await ensureLanguageSchema(env);
+
+  if (!language) {
+    await env.DB.prepare(`
+      DELETE FROM user_language_preferences
+      WHERE user_id = ?
+    `).bind(String(userId)).run();
+    return null;
+  }
+
+  if (!SUPPORTED_LANGUAGES.has(language)) throw new Error("UNSUPPORTED_LANGUAGE");
+
+  await env.DB.prepare(`
+    INSERT INTO user_language_preferences (user_id, language, updated_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(user_id) DO UPDATE SET
+      language = excluded.language,
+      updated_at = excluded.updated_at
+  `).bind(String(userId), language, Date.now()).run();
+
+  return language;
+}
+
+async function routeLanguagePreference(request, env, ctx, url) {
+  if (url.pathname !== "/profile/language") return null;
+  if (request.method !== "GET" && request.method !== "POST") return null;
+
+  const user = await getCoreUser(request, env, ctx);
+  if (!user?.id) return json(request, { ok: false, code: "UNAUTHORIZED" }, 401);
+
+  if (request.method === "GET") {
+    const language = await getSavedLanguage(env, user.id);
+    return json(request, {
+      ok: true,
+      language,
+      source: language ? "profile" : "browser",
+      supported: [...SUPPORTED_LANGUAGES]
+    });
+  }
+
+  let body = {};
+  try { body = await request.json(); }
+  catch (_) { return json(request, { ok: false, code: "INVALID_JSON" }, 400); }
+
+  const requested = body?.language;
+  const language = normalizeLanguage(requested);
+
+  if (
+    requested != null &&
+    String(requested).trim() !== "" &&
+    String(requested).trim().toLowerCase() !== "auto" &&
+    !language
+  ) {
+    return json(request, { ok: false, code: "UNSUPPORTED_LANGUAGE" }, 400);
+  }
+
+  await saveLanguage(env, user.id, language);
+
+  return json(request, {
+    ok: true,
+    language,
+    source: language ? "profile" : "browser"
+  });
+}
+
+async function enrichMeResponse(request, env, response) {
+  if (!response.ok) return response;
+
+  let data;
+  try { data = await response.clone().json(); }
+  catch (_) { return response; }
+
+  if (!data?.id) return response;
+
+  const language = await getSavedLanguage(env, data.id);
+  data.language = language;
+  data.language_source = language ? "profile" : "browser";
+  data.supported_languages = [...SUPPORTED_LANGUAGES];
+
+  const headers = new Headers(response.headers);
+  headers.set("Content-Type", "application/json; charset=utf-8");
+  headers.set("Cache-Control", "no-store");
+
+  return new Response(JSON.stringify(data), {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
+async function maybePersistLanguageFromProfileUpdate(request, env, ctx, url) {
+  if (request.method !== "POST" || url.pathname !== "/profile/update") return;
+
+  let body;
+  try { body = await request.clone().json(); }
+  catch (_) { return; }
+
+  if (!Object.prototype.hasOwnProperty.call(body || {}, "language")) return;
+
+  const user = await getCoreUser(request, env, ctx);
+  if (!user?.id) return;
+
+  const requested = body.language;
+  const language = normalizeLanguage(requested);
+  if (requested && String(requested).toLowerCase() !== "auto" && !language) return;
+  await saveLanguage(env, user.id, language);
 }
 
 async function getSeasonState(request, env, ctx) {
@@ -99,10 +274,6 @@ async function rewriteFingerTerminalResponse(request, response) {
     Number(data?.level?.max_level_unlocked || 0) === 999 &&
     data?.level?.next_level == null
   ) {
-    /*
-      Terminal completion is accepted even though there is no stage 1000.
-      `terminal=true` lets UI distinguish this from a normal unlock.
-    */
     data.level.advanced = true;
     data.level.terminal = true;
 
@@ -121,11 +292,11 @@ export default {
     const runtimeEnv = normalizedEnv(env);
     const sourceUrl = new URL(request.url);
 
-    /*
-      During intermission/after the season, old rewards may still be
-      claimable but the expired pass itself is no longer for sale.
-      Upcoming/active seasons remain purchasable.
-    */
+    const languageResponse = await routeLanguagePreference(request, runtimeEnv, ctx, sourceUrl);
+    if (languageResponse) return languageResponse;
+
+    await maybePersistLanguageFromProfileUpdate(request, runtimeEnv, ctx, sourceUrl);
+
     if (
       request.method === "POST" &&
       sourceUrl.pathname === "/season/pass/pi-create"
@@ -148,6 +319,10 @@ export default {
 
     const routedRequest = rewriteAlias(request);
     let response = await coreWorker.fetch(routedRequest, runtimeEnv, ctx);
+
+    if (request.method === "GET" && sourceUrl.pathname === "/me") {
+      response = await enrichMeResponse(request, runtimeEnv, response);
+    }
 
     if (
       request.method === "POST" &&
