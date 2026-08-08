@@ -85,7 +85,6 @@ async function routeStageStars(request, env, helpers, url) {
 
   await ensureStageStarSchema(env);
 
-  /* A retry returns the exact reward already minted, never recalculating it. */
   const existing = await env.DB.prepare(`
     SELECT stars, performance, attempts, level_id, game_type, applied_at
     FROM game_stage_star_rewards
@@ -148,7 +147,8 @@ async function routeStageStars(request, env, helpers, url) {
   `).bind(user.id, gameType).first();
 
   const maxUnlocked = Number(progress?.max_level_unlocked || 1);
-  if (!(maxUnlocked > stage)) {
+  const stageConfirmed = maxUnlocked > stage || (stage === 999 && maxUnlocked === 999);
+  if (!stageConfirmed) {
     return json({
       ok: false,
       code: "STAGE_NOT_CONFIRMED",
