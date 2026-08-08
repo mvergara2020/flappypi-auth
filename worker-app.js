@@ -1,5 +1,6 @@
 import coreWorker from "./worker-entry.js";
 import { routeInternalAds } from "./ads-internal.worker.js";
+import { prepareSingleAdRevive, releaseSingleAdReservation } from "./ads-single-revive.worker.js";
 
 const EXTRA_ALLOWED_ORIGINS = new Set([
   "http://localhost:3000",
@@ -293,8 +294,20 @@ export default {
     const runtimeEnv = normalizedEnv(env);
     const sourceUrl = new URL(request.url);
 
+    const adPolicy = await prepareSingleAdRevive(request, runtimeEnv, sourceUrl);
+    if (adPolicy?.response) return withCors(request, adPolicy.response);
+
     const adResponse = await routeInternalAds(request, runtimeEnv, sourceUrl);
-    if (adResponse) return withCors(request, adResponse);
+    if (adResponse) {
+      if (adPolicy?.reservation && !adResponse.ok) {
+        await releaseSingleAdReservation(runtimeEnv, adPolicy.reservation);
+      }
+      return withCors(request, adResponse);
+    }
+
+    if (adPolicy?.reservation) {
+      await releaseSingleAdReservation(runtimeEnv, adPolicy.reservation);
+    }
 
     const languageResponse = await routeLanguagePreference(request, runtimeEnv, ctx, sourceUrl);
     if (languageResponse) return languageResponse;
