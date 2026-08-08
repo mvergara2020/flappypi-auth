@@ -35,6 +35,22 @@ function json(request, body, status = 200) {
   }));
 }
 
+function normalizedEnv(env) {
+  if (env.PI_API_KEY || !env.PI_SERVER_API_KEY) return env;
+
+  /*
+    Proxy preserves D1/R2/Queue bindings exactly as Cloudflare supplied
+    them while exposing the existing server key under the generic name
+    expected by the season payment module.
+  */
+  return new Proxy(env, {
+    get(target, property, receiver) {
+      if (property === "PI_API_KEY") return target.PI_SERVER_API_KEY;
+      return Reflect.get(target, property, receiver);
+    }
+  });
+}
+
 function rewriteAlias(request) {
   const url = new URL(request.url);
 
@@ -102,6 +118,7 @@ async function rewriteFingerTerminalResponse(request, response) {
 
 export default {
   async fetch(request, env, ctx) {
+    const runtimeEnv = normalizedEnv(env);
     const sourceUrl = new URL(request.url);
 
     /*
@@ -113,7 +130,7 @@ export default {
       request.method === "POST" &&
       sourceUrl.pathname === "/season/pass/pi-create"
     ) {
-      const season = await getSeasonState(request, env, ctx);
+      const season = await getSeasonState(request, runtimeEnv, ctx);
 
       if (
         season.ok &&
@@ -130,7 +147,7 @@ export default {
     }
 
     const routedRequest = rewriteAlias(request);
-    let response = await coreWorker.fetch(routedRequest, env, ctx);
+    let response = await coreWorker.fetch(routedRequest, runtimeEnv, ctx);
 
     if (
       request.method === "POST" &&
@@ -143,6 +160,6 @@ export default {
   },
 
   async queue(batch, env, ctx) {
-    return coreWorker.queue(batch, env, ctx);
+    return coreWorker.queue(batch, normalizedEnv(env), ctx);
   }
 };
