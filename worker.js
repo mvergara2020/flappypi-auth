@@ -677,7 +677,7 @@ async function enqueueGameProgress({
 
   const nextSeq = previousSeq + 1;
 
-  await env.GAME_POINTS_QUEUE.send({
+  const progressEvent = {
     event_id:
       `${gameUid}:${nextSeq}:${final ? 1 : 0}`,
 
@@ -706,7 +706,41 @@ async function enqueueGameProgress({
       now,
 
     final: final === true
-  });
+  };
+
+  let queued = false;
+  let confirmed = false;
+
+  const queueAvailable =
+    !!env.GAME_POINTS_QUEUE &&
+    typeof env.GAME_POINTS_QUEUE.send === "function";
+
+  if (queueAvailable) {
+    try {
+      await env.GAME_POINTS_QUEUE.send(progressEvent);
+      queued = true;
+    } catch (error) {
+      console.warn("[GAME POINTS QUEUE SEND FAILED]", {
+        game_uid: gameUid,
+        game_type: game.id,
+        message: String(error?.message || error)
+      });
+    }
+  }
+
+  /*
+    El finish confirma en D1 antes de responder.
+    Si Queue no está disponible, los checkpoints también
+    usan D1 como fallback para no perder PTS.
+
+    consolidateGamePointsEvent() es idempotente por
+    game_uid + métrica acumulada, por lo que el mensaje
+    posterior de Queue no duplica puntos.
+  */
+  if (final === true || queued === false) {
+    await consolidateGamePointsEvent(env, progressEvent);
+    confirmed = true;
+  }
 
   /*
     El nuevo recibo se genera solamente después de que
@@ -725,7 +759,8 @@ async function enqueueGameProgress({
     });
 
   return {
-    queued: true,
+    queued,
+    confirmed,
     final: final === true,
     seq: nextSeq,
     cumulativeMetric,
@@ -1466,7 +1501,7 @@ const FLAPPY_STAGE_TEMPLATES = {
 
 /* =========================================================
    FLAPPY CLASSIC - 999 STAGES
-   STAGE N requires N * 5 real pipes / official PTS.
+   STAGE N requires N real pipes / official PTS.
    Mechanics reuse the original 50-stage templates cyclically.
 ========================================================= */
 function buildFlappyClassicStages(maxStage = 999) {
@@ -1478,7 +1513,7 @@ function buildFlappyClassicStages(maxStage = 999) {
 
     stages[stage] = Object.freeze({
       ...template,
-      pipes_target: stage * 5,
+      pipes_target: stage,
       stage_id: stage,
       template_stage: templateStage
     });
@@ -3635,9 +3670,11 @@ if (
       progress.deltaPoints,
 
     sync_status:
-      progress.queued
-        ? "queued"
-        : "unchanged",
+      progress.confirmed
+        ? "confirmed"
+        : progress.queued
+          ? "queued"
+          : "unchanged",
 
     receiptToken:
       progress.receiptToken
@@ -4790,7 +4827,9 @@ if (game.id !== "legacy") {
         progress.deltaPoints,
 
       sync_status:
-        progress.queued
+      progress.confirmed
+        ? "confirmed"
+        : progress.queued
           ? "queued"
           : "unchanged",
 
@@ -5024,9 +5063,11 @@ if (game.id !== "legacy") {
         game_type: game.id,
     
         points_sync_status:
-          progress.queued
-            ? "queued"
-            : "unchanged",
+      progress.confirmed
+        ? "confirmed"
+        : progress.queued
+          ? "queued"
+          : "unchanged",
     
         receiptToken:
           progress.receiptToken,
@@ -5159,9 +5200,11 @@ if (game.id !== "legacy") {
       progress.deltaPoints,
 
     sync_status:
-      progress.queued
-        ? "queued"
-        : "unchanged",
+      progress.confirmed
+        ? "confirmed"
+        : progress.queued
+          ? "queued"
+          : "unchanged",
 
     receiptToken:
       progress.receiptToken,
