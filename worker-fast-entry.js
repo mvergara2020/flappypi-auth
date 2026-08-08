@@ -1,14 +1,13 @@
 import appWorker from "./worker-app.js";
 import { routeShopCatalog } from "./shop-catalog.worker.js";
 
-const ENTRY_VERSION = "2026-08-08-shop-catalog-v2";
+const ENTRY_VERSION = "2026-08-08-shop-catalog-v3";
 
 function diagnosticJson(request, body, status = 200, extraHeaders = {}) {
   const text = JSON.stringify(body, null, 2);
   const headers = new Headers({
     "Content-Type": "application/json; charset=utf-8",
     "Cache-Control": "no-store",
-    "Content-Length": String(new TextEncoder().encode(text).byteLength),
     "X-FlappyPi-Entry": ENTRY_VERSION,
     ...extraHeaders
   });
@@ -36,7 +35,15 @@ async function decorateShopResponse(response, startedAt, path) {
   const elapsed = Date.now() - startedAt;
   const headers = new Headers(response.headers);
 
-  headers.set("Content-Length", String(bytes));
+  /*
+    Never force Content-Length here.
+
+    Wrangler/Cloudflare owns HTTP framing and content encoding. A manually
+    calculated uncompressed length can disagree with the bytes transferred
+    after compression and leave browser fetches waiting even though the Worker
+    already logged 200 OK.
+  */
+  headers.delete("Content-Length");
   headers.set("X-FlappyPi-Entry", ENTRY_VERSION);
   headers.set("X-FlappyPi-Route", "shop-catalog");
   headers.set("X-FlappyPi-Path", path);
