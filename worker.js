@@ -1466,7 +1466,7 @@ const FLAPPY_STAGE_TEMPLATES = {
 
 /* =========================================================
    FLAPPY CLASSIC - 999 STAGES
-   STAGE N requires N real pipes / N official PTS.
+   STAGE N requires N * 5 real pipes / official PTS.
    Mechanics reuse the original 50-stage templates cyclically.
 ========================================================= */
 function buildFlappyClassicStages(maxStage = 999) {
@@ -1478,7 +1478,7 @@ function buildFlappyClassicStages(maxStage = 999) {
 
     stages[stage] = Object.freeze({
       ...template,
-      pipes_target: stage,
+      pipes_target: stage * 5,
       stage_id: stage,
       template_stage: templateStage
     });
