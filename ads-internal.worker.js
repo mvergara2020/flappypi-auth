@@ -1,6 +1,7 @@
 const INTERNAL_AD_SECONDS = 8;
 const INTERNAL_AD_TTL_MS = 2 * 60 * 1000;
 const MAX_REVIVES = 3;
+const REVIVE_COSTS_FLAPPYCOIN = Object.freeze([500, 500, 500]);
 
 let schemaPromise = null;
 
@@ -127,22 +128,61 @@ async function readJson(request) {
   catch (_) { return {}; }
 }
 
+async function countRevives(env, gameUid, userId) {
+  const row = await env.DB.prepare(`
+    SELECT COUNT(*) AS cnt
+    FROM game_revives
+    WHERE game_uid = ? AND user_id = ?
+  `).bind(gameUid, userId).first();
+  return Number(row?.cnt || 0);
+}
+
+function reviveCostForNumber(reviveNo) {
+  const index = Math.max(0, Math.min(REVIVE_COSTS_FLAPPYCOIN.length - 1, Number(reviveNo || 1) - 1));
+  return Number(REVIVE_COSTS_FLAPPYCOIN[index] || 0);
+}
+
+async function verifyTurnstile(request, env, body) {
+  if (env.ENV === "dev") return null;
+
+  const token = String(body?.turnstile_token || "").trim();
+  if (!token) return json({ ok: false, code: "TS_MISSING", message: "Turnstile token required" }, 400);
+
+  const ip =
+    request.headers.get("CF-Connecting-IP") ||
+    request.headers.get("X-Forwarded-For")?.split(",")[0]?.trim() ||
+    undefined;
+
+  const form = new FormData();
+  form.append("secret", String(env.TURNSTILE_SECRET || ""));
+  form.append("response", token);
+  if (ip) form.append("remoteip", ip);
+
+  try {
+    const response = await fetch("https://challenges.cloudflare.com/turnstile/v0/siteverify", {
+      method: "POST",
+      body: form
+    });
+    const result = await response.json();
+    if (result?.success === true) return null;
+    return json({ ok: false, code: "TS_INVALID", message: "Turnstile verification failed" }, 403);
+  } catch (_) {
+    return json({ ok: false, code: "TS_ERROR", message: "Turnstile verification unavailable" }, 503);
+  }
+}
+
 async function startInternalAd(request, env, body) {
   await ensureSchema(env);
   const context = await gameContext(request, env, body);
   if (context.error) return context.error;
 
-  const used = await env.DB.prepare(`
-    SELECT tid FROM game_ad_revives
-    WHERE game_uid = ? AND user_id = ?
-    LIMIT 1
-  `).bind(context.gameUid, context.userId).first();
-
-  if (used) {
+  const used = await countRevives(env, context.gameUid, context.userId);
+  if (used >= MAX_REVIVES) {
     return json({
       ok: false,
-      code: "REWARDED_REVIVE_ALREADY_USED",
-      message: "Only one rewarded extra life is available per run"
+      code: "REVIVE_LIMIT_REACHED",
+      revives_used: used,
+      max_revives: MAX_REVIVES
     }, 409);
   }
 
@@ -162,6 +202,8 @@ async function startInternalAd(request, env, body) {
       duration_seconds: INTERNAL_AD_SECONDS,
       ready_at: Number(existing.ready_at),
       expires_at: Number(existing.expires_at),
+      revives_used: used,
+      max_revives: MAX_REVIVES,
       reused: true
     });
   }
@@ -191,6 +233,8 @@ async function startInternalAd(request, env, body) {
     duration_seconds: INTERNAL_AD_SECONDS,
     ready_at: readyAt,
     expires_at: expiresAt,
+    revives_used: used,
+    max_revives: MAX_REVIVES,
     reused: false
   });
 }
@@ -224,6 +268,16 @@ async function completeInternalAd(request, env, body) {
       ok: false,
       code: "AD_TIME_NOT_COMPLETE",
       remaining_ms: Number(row.ready_at) - now
+    }, 409);
+  }
+
+  const used = await countRevives(env, context.gameUid, context.userId);
+  if (used >= MAX_REVIVES) {
+    return json({
+      ok: false,
+      code: "REVIVE_LIMIT_REACHED",
+      revives_used: used,
+      max_revives: MAX_REVIVES
     }, 409);
   }
 
@@ -271,20 +325,6 @@ async function rewardedRevive(request, env, body) {
   const tid = String(body?.ad_tid || body?.tid || "").trim();
   if (!tid) return json({ ok: false, code: "AD_TID_REQUIRED" }, 400);
 
-  const alreadyUsed = await env.DB.prepare(`
-    SELECT tid FROM game_ad_revives
-    WHERE game_uid = ? AND user_id = ?
-    LIMIT 1
-  `).bind(context.gameUid, context.userId).first();
-
-  if (alreadyUsed) {
-    return json({
-      ok: false,
-      code: "REWARDED_REVIVE_ALREADY_USED",
-      message: "Only one rewarded extra life is available per run"
-    }, 409);
-  }
-
   const reward = await env.DB.prepare(`
     SELECT tid,provider,status,reward_type
     FROM ad_rewards
@@ -294,13 +334,7 @@ async function rewardedRevive(request, env, body) {
 
   if (!reward) return json({ ok: false, code: "AD_REWARD_NOT_AVAILABLE" }, 409);
 
-  const reviveAgg = await env.DB.prepare(`
-    SELECT COUNT(*) AS cnt
-    FROM game_revives
-    WHERE game_uid = ? AND user_id = ?
-  `).bind(context.gameUid, context.userId).first();
-
-  const used = Number(reviveAgg?.cnt || 0);
+  const used = await countRevives(env, context.gameUid, context.userId);
   if (used >= MAX_REVIVES) {
     return json({
       ok: false,
@@ -312,31 +346,42 @@ async function rewardedRevive(request, env, body) {
 
   const now = Date.now();
   const reviveNo = used + 1;
+  const reviveId = crypto.randomUUID();
 
-  const guard = await env.DB.prepare(`
-    INSERT OR IGNORE INTO game_ad_revives (game_uid,user_id,tid,provider,created_at)
-    VALUES (?,?,?,?,?)
-  `).bind(context.gameUid, context.userId, tid, String(reward.provider || "ad"), now).run();
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO game_revives (id,game_uid,user_id,revive_no,eggs_used,created_at)
+      SELECT ?,?,?,?,?,?
+      WHERE EXISTS (
+        SELECT 1 FROM ad_rewards
+        WHERE tid=? AND user_id=? AND reward_type='revive' AND status='rewarded'
+      )
+      AND (
+        SELECT COUNT(*) FROM game_revives WHERE game_uid=? AND user_id=?
+      ) < ?
+    `).bind(
+      reviveId,
+      context.gameUid,
+      context.userId,
+      reviveNo,
+      0,
+      now,
+      tid,
+      context.userId,
+      context.gameUid,
+      context.userId,
+      MAX_REVIVES
+    ),
+    env.DB.prepare(`
+      UPDATE ad_rewards
+      SET status='consumed', consumed_at=?
+      WHERE tid=? AND user_id=? AND status='rewarded'
+        AND EXISTS (SELECT 1 FROM game_revives WHERE id=?)
+    `).bind(now, tid, context.userId, reviveId)
+  ]);
 
-  if (Number(guard?.meta?.changes || 0) !== 1) {
-    return json({ ok: false, code: "REWARDED_REVIVE_ALREADY_USED" }, 409);
-  }
-
-  try {
-    await env.DB.batch([
-      env.DB.prepare(`
-        INSERT INTO game_revives (id,game_uid,user_id,revive_no,eggs_used,created_at)
-        VALUES (?,?,?,?,0,?)
-      `).bind(crypto.randomUUID(), context.gameUid, context.userId, reviveNo, now),
-      env.DB.prepare(`
-        UPDATE ad_rewards
-        SET status='consumed', consumed_at=?
-        WHERE tid=? AND user_id=? AND status='rewarded'
-      `).bind(now, tid, context.userId)
-    ]);
-  } catch (error) {
-    await env.DB.prepare(`DELETE FROM game_ad_revives WHERE game_uid=? AND tid=?`).bind(context.gameUid, tid).run().catch(() => {});
-    throw error;
+  if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+    return json({ ok: false, code: "AD_REWARD_NOT_AVAILABLE" }, 409);
   }
 
   const wallet = await env.DB.prepare(`
@@ -349,11 +394,103 @@ async function rewardedRevive(request, env, body) {
     revive_no: reviveNo,
     revives_used: reviveNo,
     max_revives: MAX_REVIVES,
+    flappycoin_used: 0,
     eggs_used: 0,
+    flappycoin_left: Number(wallet?.eggs || 0),
     eggs_left: Number(wallet?.eggs || 0),
     method: "ad",
-    provider: String(reward.provider || "ad"),
-    rewarded_revive_used: true
+    provider: String(reward.provider || "ad")
+  });
+}
+
+async function flappyCoinRevive(request, env, body) {
+  const context = await gameContext(request, env, body);
+  if (context.error) return context.error;
+
+  const turnstileError = await verifyTurnstile(request, env, body);
+  if (turnstileError) return turnstileError;
+
+  const used = await countRevives(env, context.gameUid, context.userId);
+  if (used >= MAX_REVIVES) {
+    return json({
+      ok: false,
+      code: "REVIVE_LIMIT_REACHED",
+      revives_used: used,
+      max_revives: MAX_REVIVES
+    }, 409);
+  }
+
+  const reviveNo = used + 1;
+  const cost = reviveCostForNumber(reviveNo);
+  const now = Date.now();
+  const reviveId = crypto.randomUUID();
+
+  const before = await env.DB.prepare(`
+    SELECT COALESCE(eggs,0) AS eggs
+    FROM users WHERE id=? LIMIT 1
+  `).bind(context.userId).first();
+
+  if (Number(before?.eggs || 0) < cost) {
+    return json({
+      ok: false,
+      code: "NOT_ENOUGH_FLAPPYCOIN",
+      required_flappycoin: cost,
+      flappycoin_left: Number(before?.eggs || 0),
+      revive_no: reviveNo
+    }, 409);
+  }
+
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      INSERT INTO game_revives (id,game_uid,user_id,revive_no,eggs_used,created_at)
+      SELECT ?,?,?,?,?,?
+      WHERE EXISTS (
+        SELECT 1 FROM users WHERE id=? AND COALESCE(eggs,0) >= ?
+      )
+      AND (
+        SELECT COUNT(*) FROM game_revives WHERE game_uid=? AND user_id=?
+      ) < ?
+    `).bind(
+      reviveId,
+      context.gameUid,
+      context.userId,
+      reviveNo,
+      cost,
+      now,
+      context.userId,
+      cost,
+      context.gameUid,
+      context.userId,
+      MAX_REVIVES
+    ),
+    env.DB.prepare(`
+      UPDATE users
+      SET eggs = COALESCE(eggs,0) - ?
+      WHERE id=?
+        AND EXISTS (SELECT 1 FROM game_revives WHERE id=?)
+    `).bind(cost, context.userId, reviveId)
+  ]);
+
+  if (Number(results?.[0]?.meta?.changes || 0) !== 1) {
+    return json({ ok: false, code: "REVIVE_NOT_AVAILABLE" }, 409);
+  }
+
+  const wallet = await env.DB.prepare(`
+    SELECT COALESCE(eggs,0) AS eggs
+    FROM users WHERE id=? LIMIT 1
+  `).bind(context.userId).first();
+
+  return json({
+    ok: true,
+    revive_no: reviveNo,
+    revives_used: reviveNo,
+    max_revives: MAX_REVIVES,
+    flappycoin_used: cost,
+    eggs_used: cost,
+    flappycoin_left: Number(wallet?.eggs || 0),
+    eggs_left: Number(wallet?.eggs || 0),
+    method: "flappycoin",
+    revive_costs_flappycoin: REVIVE_COSTS_FLAPPYCOIN
   });
 }
 
@@ -371,8 +508,13 @@ export async function routeInternalAds(request, env, url = new URL(request.url))
   if (url.pathname === "/game/revive") {
     const body = await readJson(request);
     const method = String(body?.method || "").toLowerCase();
+
     if (method === "ad" || method === "rewarded_ad") {
       return rewardedRevive(request, env, body);
+    }
+
+    if (method === "eggs" || method === "coins" || method === "flappycoin" || !method) {
+      return flappyCoinRevive(request, env, body);
     }
   }
 
