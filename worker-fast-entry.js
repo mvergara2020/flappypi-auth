@@ -1,7 +1,7 @@
 import appWorker from "./worker-app.js";
-import { routeLocalFastShop } from "./shop-local-fast.worker.js";
+import { routeShopCatalog } from "./shop-catalog.worker.js";
 
-const ENTRY_VERSION = "2026-08-08-fast-shop-diag-v1";
+const ENTRY_VERSION = "2026-08-08-shop-catalog-v2";
 
 function diagnosticJson(request, body, status = 200, extraHeaders = {}) {
   const text = JSON.stringify(body, null, 2);
@@ -18,7 +18,9 @@ function diagnosticJson(request, body, status = 200, extraHeaders = {}) {
     "http://localhost:3000",
     "http://127.0.0.1:3000",
     "http://192.168.1.81:3000",
-    "https://192.168.1.81:3000"
+    "https://192.168.1.81:3000",
+    "https://qa.classic.flappypi.com",
+    "https://classic.flappypi.com"
   ].includes(origin)) {
     headers.set("Access-Control-Allow-Origin", origin);
     headers.set("Access-Control-Allow-Credentials", "true");
@@ -28,7 +30,7 @@ function diagnosticJson(request, body, status = 200, extraHeaders = {}) {
   return new Response(text, { status, headers });
 }
 
-async function decorateFastResponse(request, response, startedAt, path) {
+async function decorateShopResponse(response, startedAt, path) {
   const text = await response.text();
   const bytes = new TextEncoder().encode(text).byteLength;
   const elapsed = Date.now() - startedAt;
@@ -36,17 +38,16 @@ async function decorateFastResponse(request, response, startedAt, path) {
 
   headers.set("Content-Length", String(bytes));
   headers.set("X-FlappyPi-Entry", ENTRY_VERSION);
-  headers.set("X-FlappyPi-Route", "local-fast-shop");
+  headers.set("X-FlappyPi-Route", "shop-catalog");
   headers.set("X-FlappyPi-Path", path);
-  headers.set("X-FlappyPi-Catalog-Bytes", String(bytes));
+  headers.set("X-FlappyPi-Response-Bytes", String(bytes));
   headers.set("X-FlappyPi-Elapsed-Ms", String(elapsed));
 
-  console.log("[FAST SHOP RESPONSE]", {
+  console.log("[SHOP CATALOG RESPONSE]", {
     path,
     status: response.status,
     bytes,
-    elapsed_ms: elapsed,
-    env: "dev-fast-path"
+    elapsed_ms: elapsed
   });
 
   return new Response(text, {
@@ -80,6 +81,7 @@ export default {
         has_db: !!env?.DB,
         has_queue: !!env?.GAME_POINTS_QUEUE,
         has_r2: !!env?.GAME_PHOTOS,
+        has_coingecko_demo_key: !!String(env?.COINGECKO_DEMO_API_KEY || "").trim(),
         url: request.url,
         now: Date.now()
       }, 200, {
@@ -87,9 +89,9 @@ export default {
       });
     }
 
-    const fastShopResponse = routeLocalFastShop(request, env, url);
-    if (fastShopResponse) {
-      return decorateFastResponse(request, fastShopResponse, startedAt, path);
+    const shopResponse = await routeShopCatalog(request, env, url);
+    if (shopResponse) {
+      return decorateShopResponse(shopResponse, startedAt, path);
     }
 
     console.log("[WORKER DELEGATE]", {
