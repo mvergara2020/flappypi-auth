@@ -19,6 +19,10 @@ max_retries = 10
 max_concurrency = 1
 dead_letter_queue = "flappypi-game-points-dlq"
 
+[[r2_buckets]]
+binding = "GAME_PHOTOS"
+bucket_name = "flappypi-game-photos"
+
 [vars]
 ENV = "dev"
 
@@ -50,3 +54,7 @@ max_batch_timeout = 20
 max_retries = 10
 max_concurrency = 1
 dead_letter_queue = "flappypi-game-points-qa-dlq"
+
+[[env.qa.r2_buckets]]
+binding = "GAME_PHOTOS"
+bucket_name = "flappypi-game-photos-qa"
