@@ -1,3 +1,5 @@
+import { registerGamePhoto, routePlatform } from "./platform.worker.js";
+
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 const PHOTO_CONTENT_TYPES = new Map([
   ["image/jpeg", "jpg"],
@@ -155,6 +157,13 @@ export async function routeGamePhoto(request, env, helpers = {}) {
   const normalizeGameId = helpers.normalizeGameId || (value => safeText(value, 64));
   if (typeof corsHeaders !== "function" || typeof requireUser !== "function") return null;
 
+  /*
+    Platform features piggyback on the already installed Worker router hook.
+    This avoids touching the large worker.js for every new feature module.
+  */
+  const platformResponse = await routePlatform(request, env, { requireUser, corsHeaders, normalizeGameId });
+  if (platformResponse) return platformResponse;
+
   const stageStarsResponse = await routeStageStars(request, env, { requireUser, corsHeaders, normalizeGameId }, url);
   if (stageStarsResponse) return stageStarsResponse;
 
@@ -184,6 +193,23 @@ export async function routeGamePhoto(request, env, helpers = {}) {
       httpMetadata: { contentType, cacheControl: "public, max-age=31536000, immutable" },
       customMetadata: { owner_user_id: safeText(user.id,120), game_type: safeText(gameType,64), stage: String(stage), total_points: String(totalPoints), created_at: String(createdAt) }
     });
+
+    try {
+      await registerGamePhoto(env, {
+        photo_id: photoId,
+        owner_user_id: user.id,
+        game_type: gameType,
+        stage,
+        total_points: totalPoints,
+        storage_key: key,
+        content_type: contentType,
+        created_at: createdAt
+      });
+    } catch (error) {
+      try { await env.GAME_PHOTOS.delete(key); } catch (_) {}
+      console.error("[GAME PHOTO INDEX ERROR]", error);
+      return json({ ok: false, code: "PHOTO_INDEX_FAILED" }, 500, request, corsHeaders);
+    }
 
     return json({ ok: true, photo_id: photoId, content_type: contentType, size: bytes.byteLength, storage_key: key, url: `${url.origin}/game/photo/${fileName}` }, 201, request, corsHeaders);
   }
