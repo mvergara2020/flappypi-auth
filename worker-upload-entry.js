@@ -1,6 +1,15 @@
 import baseWorker from "./worker-fast-entry.js";
+import { routeSponsors } from "./sponsor.worker.js";
 
 const MAX_SHARED_IMAGE_BYTES = 300 * 1024;
+const ALLOWED_ORIGINS = new Set([
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://192.168.1.81:3000",
+  "https://192.168.1.81:3000",
+  "https://qa.classic.flappypi.com",
+  "https://classic.flappypi.com"
+]);
 
 function isSharedImageUpload(request) {
   if (request.method !== "POST") return false;
@@ -8,9 +17,13 @@ function isSharedImageUpload(request) {
   return path === "/game/photo" || path === "/sponsors";
 }
 
+function isSponsorRoute(request) {
+  return new URL(request.url).pathname === "/sponsors" || new URL(request.url).pathname.startsWith("/sponsors/");
+}
+
 function corsHeaders(request) {
-  const origin = request.headers.get("Origin");
-  if (!origin) return {};
+  const origin = request.headers.get("Origin") || "";
+  if (!origin || !ALLOWED_ORIGINS.has(origin)) return {};
   return {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Credentials": "true",
@@ -18,21 +31,26 @@ function corsHeaders(request) {
   };
 }
 
+function json(request, body, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      ...corsHeaders(request),
+      "Content-Type": "application/json; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-FlappyPi-Upload-Entry": "2026-08-09-sponsors-v2"
+    }
+  });
+}
+
 function tooLarge(request, actualBytes = null) {
-  return new Response(JSON.stringify({
+  return json(request, {
     ok: false,
     code: "IMAGE_UPLOAD_TOO_LARGE",
     max_bytes: MAX_SHARED_IMAGE_BYTES,
     max_kb: 300,
     actual_bytes: actualBytes
-  }), {
-    status: 413,
-    headers: {
-      ...corsHeaders(request),
-      "Content-Type": "application/json; charset=utf-8",
-      "Cache-Control": "no-store"
-    }
-  });
+  }, 413);
 }
 
 async function bodyExceedsLimit(request, maxBytes) {
@@ -62,10 +80,36 @@ async function bodyExceedsLimit(request, maxBytes) {
   return { exceeds:false, bytes:total };
 }
 
+async function requireUserThroughActiveWorker(request, env, ctx) {
+  const url = new URL(request.url);
+  url.pathname = "/me";
+  url.search = "?lvl_loaded=1";
+
+  const response = await baseWorker.fetch(new Request(url.toString(), {
+    method: "GET",
+    headers: request.headers
+  }), env, ctx);
+
+  if (!response?.ok) return null;
+  const user = await response.json().catch(() => null);
+  return user?.id ? user : null;
+}
+
 async function handleFetch(request, env, ctx) {
+  if (request.method === "OPTIONS") return baseWorker.fetch(request, env, ctx);
+
   if (isSharedImageUpload(request)) {
     const size = await bodyExceedsLimit(request, MAX_SHARED_IMAGE_BYTES);
     if (size.exceeds) return tooLarge(request, size.bytes);
+  }
+
+  if (isSponsorRoute(request)) {
+    const sponsorResponse = await routeSponsors(request, env, {
+      corsHeaders,
+      requireUser: () => requireUserThroughActiveWorker(request, env, ctx)
+    });
+    if (sponsorResponse) return sponsorResponse;
+    return json(request, { ok:false, code:"SPONSOR_ROUTE_NOT_FOUND" }, 404);
   }
 
   return baseWorker.fetch(request, env, ctx);
