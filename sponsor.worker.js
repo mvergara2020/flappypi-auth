@@ -71,8 +71,9 @@ async function sponsorQuote(env) {
   const catalog = await response.json();
   const packs = Array.isArray(catalog?.packs) ? catalog.packs : [];
   const recommended = packs.find(pack => pack.id === catalog?.recommended_pack_id) || packs.find(pack => pack.featured) || packs[0];
-  const coinsPerUsd = Math.max(1, Math.round(Number(recommended?.coins_per_usd || 0)));
-  if (!coinsPerUsd) throw new Error("SPONSOR_RATE_UNAVAILABLE");
+  const rawCoinsPerUsd = Number(recommended?.coins_per_usd || 0);
+  if (!Number.isFinite(rawCoinsPerUsd) || rawCoinsPerUsd <= 0) throw new Error("SPONSOR_RATE_UNAVAILABLE");
+  const coinsPerUsd = Math.round(rawCoinsPerUsd);
   const coinCost = Math.ceil((SPONSOR_USD_CENTS / 100) * coinsPerUsd);
   return {
     usd_cents: SPONSOR_USD_CENTS,
@@ -154,6 +155,12 @@ async function uploadSponsor(request, env, helpers, url) {
   if (request.method !== "POST" || url.pathname !== "/sponsors") return null;
   const user = await helpers.requireUser(request, env);
   if (!user) return new Response("Unauthorized", { status:401, headers:helpers.corsHeaders(request) });
+
+  const account = await env.DB.prepare(`SELECT auth_provider,COALESCE(eggs,0) AS eggs FROM users WHERE id=? LIMIT 1`).bind(user.id).first();
+  if (!account || String(account.auth_provider || "").toLowerCase() === "guest") {
+    return json({ ok:false, code:"SPONSOR_REGISTERED_ACCOUNT_REQUIRED" }, 403, request, helpers.corsHeaders);
+  }
+
   if (!env.GAME_PHOTOS || typeof env.GAME_PHOTOS.put !== "function") return json({ ok:false, code:"SPONSOR_STORAGE_NOT_CONFIGURED" }, 503, request, helpers.corsHeaders);
 
   const target = validateTargetUrl(url.searchParams.get("url"));
