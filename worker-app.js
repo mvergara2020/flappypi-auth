@@ -1,6 +1,7 @@
 import coreWorker from "./worker-entry.js";
 import { routeInternalAds } from "./ads-internal.worker.js";
 import { prepareSingleAdRevive, releaseSingleAdReservation } from "./ads-single-revive.worker.js";
+import { ensureAllGameProgress, routeGameStageProgress } from "./game-stage-progress.worker.js";
 
 const EXTRA_ALLOWED_ORIGINS = new Set([
   "http://localhost:3000",
@@ -206,10 +207,18 @@ async function enrichMeResponse(request, env, response) {
 
   if (!data?.id) return response;
 
-  const language = await getSavedLanguage(env, data.id);
+  const [language, gameProgress] = await Promise.all([
+    getSavedLanguage(env, data.id),
+    ensureAllGameProgress(env, data.id)
+  ]);
+
   data.language = language;
   data.language_source = language ? "profile" : "browser";
   data.supported_languages = [...SUPPORTED_LANGUAGES];
+  data.game_progress = {
+    ...(data.game_progress && typeof data.game_progress === "object" ? data.game_progress : {}),
+    ...gameProgress
+  };
 
   const headers = new Headers(response.headers);
   headers.set("Content-Type", "application/json; charset=utf-8");
@@ -238,6 +247,17 @@ async function maybePersistLanguageFromProfileUpdate(request, env, ctx, url) {
   const language = normalizeLanguage(requested);
   if (requested && String(requested).toLowerCase() !== "auto" && !language) return;
   await saveLanguage(env, user.id, language);
+}
+
+async function routeSharedGameStage(request, env, ctx, url) {
+  if (
+    request.method !== "POST" ||
+    (url.pathname !== "/game/stage/start" && url.pathname !== "/game/stage/finish")
+  ) return null;
+
+  const user = await getCoreUser(request, env, ctx);
+  const response = await routeGameStageProgress(request, env, user);
+  return response ? withCors(request, response) : null;
 }
 
 async function getSeasonState(request, env, ctx) {
@@ -308,6 +328,9 @@ export default {
     if (adPolicy?.reservation) {
       await releaseSingleAdReservation(runtimeEnv, adPolicy.reservation);
     }
+
+    const stageResponse = await routeSharedGameStage(request, runtimeEnv, ctx, sourceUrl);
+    if (stageResponse) return stageResponse;
 
     const languageResponse = await routeLanguagePreference(request, runtimeEnv, ctx, sourceUrl);
     if (languageResponse) return languageResponse;
