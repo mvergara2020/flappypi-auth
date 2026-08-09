@@ -41,6 +41,15 @@ async function ensurePhotoSocialSchema(env) {
       )
     `).run();
 
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS game_photo_likes (
+        photo_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        created_at INTEGER NOT NULL,
+        PRIMARY KEY (photo_id,user_id)
+      )
+    `).run();
+
     try {
       await env.DB.prepare(`ALTER TABLE game_photos ADD COLUMN comment TEXT NOT NULL DEFAULT ''`).run();
     } catch (error) {
