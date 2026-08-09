@@ -1,5 +1,6 @@
 import { registerGamePhoto, routePlatform } from "./platform.worker.js";
 import { routeSponsors } from "./sponsor.worker.js";
+import { routePhotoView } from "./photo-views.worker.js";
 
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 const MAX_PHOTO_COMMENT_CHARS = 100;
@@ -255,6 +256,9 @@ export async function routeGamePhoto(request, env, helpers = {}) {
 
   const feedResponse = await routePhotoFeed(request, env, { requireUser, corsHeaders, normalizeGameId }, url);
   if (feedResponse) return feedResponse;
+
+  const viewResponse = await routePhotoView(request, env, { corsHeaders });
+  if (viewResponse) return viewResponse;
 
   const platformResponse = await routePlatform(request, env, { requireUser, corsHeaders, normalizeGameId });
   if (platformResponse) return platformResponse;
