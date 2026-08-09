@@ -139,16 +139,41 @@ function publicSponsor(row, origin) {
 async function listSponsors(request, env, helpers, url) {
   if (request.method !== "GET" || url.pathname !== "/sponsors") return null;
   await ensureSchema(env);
-  const limit = Math.max(1, Math.min(20, Number(url.searchParams.get("limit") || 8)));
+
+  const limit = Math.max(1, Math.min(20, Math.floor(Number(url.searchParams.get("limit") || 8))));
+  const requestedPage = Math.max(1, Math.floor(Number(url.searchParams.get("page") || 1)));
+  const countRow = await env.DB.prepare(`
+    SELECT COUNT(*) AS total
+    FROM user_sponsors
+    WHERE moderation_status='APPROVED'
+  `).first();
+
+  const total = Math.max(0, Number(countRow?.total || 0));
+  const totalPages = Math.max(1, Math.ceil(total / limit));
+  const page = Math.min(requestedPage, totalPages);
+  const offset = (page - 1) * limit;
+
   const rows = await env.DB.prepare(`
     SELECT s.*,u.user_name,u.name
     FROM user_sponsors s
     LEFT JOIN users u ON u.id=s.user_id
     WHERE s.moderation_status='APPROVED'
-    ORDER BY s.created_at DESC
-    LIMIT ?
-  `).bind(limit).all();
-  return json({ ok:true, sponsors:(rows?.results || []).map(row => publicSponsor(row, url.origin)) }, 200, request, helpers.corsHeaders);
+    ORDER BY s.created_at DESC,s.sponsor_id DESC
+    LIMIT ? OFFSET ?
+  `).bind(limit, offset).all();
+
+  return json({
+    ok:true,
+    sponsors:(rows?.results || []).map(row => publicSponsor(row, url.origin)),
+    pagination:{
+      page,
+      limit,
+      total,
+      total_pages:totalPages,
+      has_previous:page > 1,
+      has_more:page < totalPages
+    }
+  }, 200, request, helpers.corsHeaders);
 }
 
 async function uploadSponsor(request, env, helpers, url) {
