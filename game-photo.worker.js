@@ -1,4 +1,5 @@
 import { registerGamePhoto, routePlatform } from "./platform.worker.js";
+import { routeSponsors } from "./sponsor.worker.js";
 
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 const MAX_PHOTO_COMMENT_CHARS = 100;
@@ -112,7 +113,6 @@ async function routePhotoFeed(request, env, helpers, url) {
   }, 200, request, corsHeaders);
 }
 
-/* Performance is based on server-observed attempts: 1 => 3★, 2-3 => 2★, 4+ => 1★. */
 function getStagePerformance(attempts) {
   const count = Math.max(1, Number(attempts || 1));
   if (count === 1) return { stars: 3, performance: "EXCELLENT" };
@@ -120,7 +120,6 @@ function getStagePerformance(attempts) {
   return { stars: 1, performance: "CLEARED" };
 }
 
-/* Lazy CREATE keeps local development zero-setup; move this table to D1 migrations before QA/prod. */
 function ensureStageStarSchema(env) {
   if (stageStarSchemaPromise) return stageStarSchemaPromise;
   stageStarSchemaPromise = env.DB.prepare(`
@@ -251,13 +250,12 @@ export async function routeGamePhoto(request, env, helpers = {}) {
   const normalizeGameId = helpers.normalizeGameId || (value => safeText(value, 64));
   if (typeof corsHeaders !== "function" || typeof requireUser !== "function") return null;
 
+  const sponsorResponse = await routeSponsors(request, env, { requireUser, corsHeaders, normalizeGameId });
+  if (sponsorResponse) return sponsorResponse;
+
   const feedResponse = await routePhotoFeed(request, env, { requireUser, corsHeaders, normalizeGameId }, url);
   if (feedResponse) return feedResponse;
 
-  /*
-    Platform features piggyback on the already installed Worker router hook.
-    This avoids touching the large worker.js for every new feature module.
-  */
   const platformResponse = await routePlatform(request, env, { requireUser, corsHeaders, normalizeGameId });
   if (platformResponse) return platformResponse;
 
