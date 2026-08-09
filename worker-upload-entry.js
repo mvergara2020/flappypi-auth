@@ -1,4 +1,4 @@
-import baseWorker from "./worker.js";
+import baseWorker from "./worker-fast-entry.js";
 
 const MAX_SHARED_IMAGE_BYTES = 300 * 1024;
 
@@ -37,9 +37,7 @@ function tooLarge(request, actualBytes = null) {
 
 async function bodyExceedsLimit(request, maxBytes) {
   const declared = Number(request.headers.get("Content-Length") || 0);
-  if (Number.isFinite(declared) && declared > maxBytes) {
-    return { exceeds:true, bytes:declared };
-  }
+  if (Number.isFinite(declared) && declared > maxBytes) return { exceeds:true, bytes:declared };
 
   const body = request.clone().body;
   if (!body) return { exceeds:false, bytes:0 };
