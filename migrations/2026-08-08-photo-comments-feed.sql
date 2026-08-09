@@ -1,5 +1,6 @@
 -- FlappyPi shared photo comments + global recent feed support.
--- Safe even when this migration creates game_photos before platform-local.sql.
+-- Safe when this migration creates game_photos before platform-local.sql.
+-- Runtime also performs the same additive schema check for local/dev compatibility.
 
 CREATE TABLE IF NOT EXISTS game_photos (
   photo_id TEXT PRIMARY KEY,
@@ -9,6 +10,7 @@ CREATE TABLE IF NOT EXISTS game_photos (
   total_points INTEGER NOT NULL DEFAULT 0,
   storage_key TEXT NOT NULL UNIQUE,
   content_type TEXT NOT NULL,
+  comment TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL,
   views INTEGER NOT NULL DEFAULT 0,
   likes INTEGER NOT NULL DEFAULT 0
@@ -21,6 +23,5 @@ CREATE TABLE IF NOT EXISTS game_photo_likes (
   PRIMARY KEY (photo_id, user_id)
 );
 
-ALTER TABLE game_photos ADD COLUMN comment TEXT NOT NULL DEFAULT '';
 CREATE INDEX IF NOT EXISTS idx_game_photos_recent ON game_photos(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_game_photos_game_recent ON game_photos(game_type, created_at DESC);
