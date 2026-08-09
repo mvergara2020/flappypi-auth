@@ -1,4 +1,4 @@
-const INTERNAL_AD_SECONDS = 8;
+const INTERNAL_AD_SECONDS = 5;
 const INTERNAL_AD_TTL_MS = 2 * 60 * 1000;
 const MAX_REVIVES = 3;
 const REVIVE_COSTS_FLAPPYCOIN = Object.freeze([500, 500, 500]);
