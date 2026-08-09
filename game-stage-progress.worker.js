@@ -4,7 +4,7 @@ const GAME_STAGE_CONFIG = Object.freeze({
   flappy_classic: Object.freeze({ maxStage: 999, coreManaged: true }),
   webcam_flappy: Object.freeze({ maxStage: 999, coreManaged: true }),
   finger_trace: Object.freeze({ maxStage: 999, coreManaged: true }),
-  fruits_memory: Object.freeze({ maxStage: 999, coreManaged: false }),
+  fruits_memory: Object.freeze({ maxStage: 9, coreManaged: false }),
   snake_999: Object.freeze({ maxStage: 999, coreManaged: false }),
   jelly_fusion: Object.freeze({ maxStage: 9999, coreManaged: false }),
   tetriz_999: Object.freeze({ maxStage: 999, coreManaged: false }),
