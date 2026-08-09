@@ -18,7 +18,8 @@ function isSharedImageUpload(request) {
 }
 
 function isSponsorRoute(request) {
-  return new URL(request.url).pathname === "/sponsors" || new URL(request.url).pathname.startsWith("/sponsors/");
+  const path = new URL(request.url).pathname;
+  return path === "/sponsors" || path.startsWith("/sponsors/");
 }
 
 function corsHeaders(request) {
@@ -31,16 +32,36 @@ function corsHeaders(request) {
   };
 }
 
+function finalizeResponse(response) {
+  if (!(response instanceof Response)) return response;
+  const headers = new Headers(response.headers);
+
+  /*
+    IMPORTANT:
+    Several lower worker layers enrich/rewrite JSON bodies (/me, game results,
+    shop responses, etc.). Never let a stale Content-Length survive that chain.
+    Wrangler/Cloudflare must frame the final body from the actual bytes.
+  */
+  headers.delete("Content-Length");
+  headers.set("X-FlappyPi-Response-Framing", "auto");
+
+  return new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers
+  });
+}
+
 function json(request, body, status = 200) {
-  return new Response(JSON.stringify(body), {
+  return finalizeResponse(new Response(JSON.stringify(body), {
     status,
     headers: {
       ...corsHeaders(request),
       "Content-Type": "application/json; charset=utf-8",
       "Cache-Control": "no-store",
-      "X-FlappyPi-Upload-Entry": "2026-08-09-sponsors-v2"
+      "X-FlappyPi-Upload-Entry": "2026-08-09-sponsors-v3"
     }
-  });
+  }));
 }
 
 function tooLarge(request, actualBytes = null) {
@@ -96,7 +117,9 @@ async function requireUserThroughActiveWorker(request, env, ctx) {
 }
 
 async function handleFetch(request, env, ctx) {
-  if (request.method === "OPTIONS") return baseWorker.fetch(request, env, ctx);
+  if (request.method === "OPTIONS") {
+    return finalizeResponse(await baseWorker.fetch(request, env, ctx));
+  }
 
   if (isSharedImageUpload(request)) {
     const size = await bodyExceedsLimit(request, MAX_SHARED_IMAGE_BYTES);
@@ -108,11 +131,11 @@ async function handleFetch(request, env, ctx) {
       corsHeaders,
       requireUser: () => requireUserThroughActiveWorker(request, env, ctx)
     });
-    if (sponsorResponse) return sponsorResponse;
+    if (sponsorResponse) return finalizeResponse(sponsorResponse);
     return json(request, { ok:false, code:"SPONSOR_ROUTE_NOT_FOUND" }, 404);
   }
 
-  return baseWorker.fetch(request, env, ctx);
+  return finalizeResponse(await baseWorker.fetch(request, env, ctx));
 }
 
 export default {
