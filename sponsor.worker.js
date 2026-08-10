@@ -181,9 +181,9 @@ async function uploadSponsor(request, env, helpers, url) {
   const user = await helpers.requireUser(request, env);
   if (!user) return new Response("Unauthorized", { status:401, headers:helpers.corsHeaders(request) });
 
-  const account = await env.DB.prepare(`SELECT auth_provider,COALESCE(eggs,0) AS eggs FROM users WHERE id=? LIMIT 1`).bind(user.id).first();
-  if (!account || String(account.auth_provider || "").toLowerCase() === "guest") {
-    return json({ ok:false, code:"SPONSOR_REGISTERED_ACCOUNT_REQUIRED" }, 403, request, helpers.corsHeaders);
+  const account = await env.DB.prepare(`SELECT COALESCE(eggs,0) AS eggs FROM users WHERE id=? LIMIT 1`).bind(user.id).first();
+  if (!account) {
+    return json({ ok:false, code:"SPONSOR_ACCOUNT_NOT_FOUND" }, 404, request, helpers.corsHeaders);
   }
 
   if (!env.GAME_PHOTOS || typeof env.GAME_PHOTOS.put !== "function") return json({ ok:false, code:"SPONSOR_STORAGE_NOT_CONFIGURED" }, 503, request, helpers.corsHeaders);
