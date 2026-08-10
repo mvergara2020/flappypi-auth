@@ -156,6 +156,37 @@ async function saveLanguage(env, userId, language) {
   return language;
 }
 
+async function repairAuthProvider(env, userId) {
+  if (!userId) return "guest";
+
+  const row = await env.DB.prepare(`
+    SELECT auth_provider, email
+    FROM users
+    WHERE id = ?
+    LIMIT 1
+  `).bind(String(userId)).first();
+
+  const provider = String(row?.auth_provider || "").trim().toLowerCase();
+  if (provider && provider !== "guest") return provider;
+
+  if (String(row?.email || "").trim()) {
+    await env.DB.prepare(`
+      UPDATE users
+      SET auth_provider = 'google'
+      WHERE id = ?
+        AND (
+          auth_provider IS NULL OR
+          TRIM(auth_provider) = '' OR
+          LOWER(auth_provider) = 'guest'
+        )
+    `).bind(String(userId)).run();
+
+    return "google";
+  }
+
+  return provider || "guest";
+}
+
 async function routeLanguagePreference(request, env, ctx, url) {
   if (url.pathname !== "/profile/language") return null;
   if (request.method !== "GET" && request.method !== "POST") return null;
@@ -207,11 +238,13 @@ async function enrichMeResponse(request, env, response) {
 
   if (!data?.id) return response;
 
-  const [language, gameProgress] = await Promise.all([
+  const [language, gameProgress, authProvider] = await Promise.all([
     getSavedLanguage(env, data.id),
-    ensureAllGameProgress(env, data.id)
+    ensureAllGameProgress(env, data.id),
+    repairAuthProvider(env, data.id)
   ]);
 
+  data.auth_provider = authProvider;
   data.language = language;
   data.language_source = language ? "profile" : "browser";
   data.supported_languages = [...SUPPORTED_LANGUAGES];
