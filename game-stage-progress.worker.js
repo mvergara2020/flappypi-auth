@@ -1,4 +1,5 @@
 const MAX_STAGE_DEFAULT = 999;
+const CURRENT_GAME_STATS_SEASON_ID = "S5";
 
 const GAME_STAGE_CONFIG = Object.freeze({
   flappy_classic: Object.freeze({ maxStage: 999, coreManaged: true }),
@@ -38,10 +39,177 @@ const GAME_ALIASES = Object.freeze({
   "fusion-999": "fusion_999"
 });
 
+let stageStatsSchemaPromise = null;
+
 function normalizeGameType(value) {
   const raw = String(value || "").trim().toLowerCase().replace(/\s+/g, "_");
   const normalized = raw.replace(/-/g, "_").replace(/[^a-z0-9_]/g, "");
   return GAME_ALIASES[raw] || GAME_ALIASES[normalized] || normalized;
+}
+
+function fruitsMemoryStagePoints(stage) {
+  const level = Math.max(1, Math.min(9, Number(stage) || 1));
+  const base = Math.min(10, level + 1);
+  let rows = base;
+  let cols = base;
+  if ((rows * cols) % 2 !== 0) cols = Math.min(10, cols + 1);
+  return (rows * cols) / 2;
+}
+
+function officialStagePoints(gameType, stage) {
+  if (gameType === "fruits_memory") return fruitsMemoryStagePoints(stage);
+  return 0;
+}
+
+function ensureStageStatsSchema(env) {
+  if (stageStatsSchemaPromise) return stageStatsSchemaPromise;
+
+  stageStatsSchemaPromise = env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS game_stage_stats_claims (
+      user_id TEXT NOT NULL,
+      game_type TEXT NOT NULL,
+      stage INTEGER NOT NULL,
+      points INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      applied_at INTEGER,
+      PRIMARY KEY (user_id, game_type, stage)
+    )
+  `).run().catch(error => {
+    stageStatsSchemaPromise = null;
+    throw error;
+  });
+
+  return stageStatsSchemaPromise;
+}
+
+async function applyStageStats(env, userId, gameType, stage, now = Date.now()) {
+  const points = officialStagePoints(gameType, stage);
+
+  if (!Number.isInteger(points) || points <= 0) {
+    return {
+      enabled: false,
+      applied: false,
+      duplicate: false,
+      points: 0,
+      season_id: CURRENT_GAME_STATS_SEASON_ID
+    };
+  }
+
+  await ensureStageStatsSchema(env);
+
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      INSERT OR IGNORE INTO game_stage_stats_claims (
+        user_id,
+        game_type,
+        stage,
+        points,
+        created_at,
+        applied_at
+      ) VALUES (?, ?, ?, ?, ?, NULL)
+    `).bind(
+      String(userId),
+      gameType,
+      stage,
+      points,
+      now
+    ),
+
+    env.DB.prepare(`
+      INSERT INTO user_game_stats (
+        user_id,
+        game_type,
+        total_points,
+        season_points,
+        season_id,
+        best_score,
+        total_pipes,
+        games_played,
+        updated_at
+      )
+      SELECT ?, ?, ?, ?, ?, ?, 0, 1, ?
+      WHERE EXISTS (
+        SELECT 1
+        FROM game_stage_stats_claims
+        WHERE user_id = ?
+          AND game_type = ?
+          AND stage = ?
+          AND applied_at IS NULL
+      )
+
+      ON CONFLICT(user_id, game_type)
+      DO UPDATE SET
+        total_points =
+          user_game_stats.total_points +
+          excluded.total_points,
+
+        season_points = CASE
+          WHEN user_game_stats.season_id =
+            excluded.season_id
+          THEN
+            user_game_stats.season_points +
+            excluded.season_points
+          ELSE
+            excluded.season_points
+        END,
+
+        season_id =
+          excluded.season_id,
+
+        best_score = CASE
+          WHEN excluded.best_score >
+            user_game_stats.best_score
+          THEN excluded.best_score
+          ELSE user_game_stats.best_score
+        END,
+
+        total_pipes =
+          user_game_stats.total_pipes +
+          excluded.total_pipes,
+
+        games_played =
+          user_game_stats.games_played +
+          excluded.games_played,
+
+        updated_at =
+          excluded.updated_at
+    `).bind(
+      String(userId),
+      gameType,
+      points,
+      points,
+      CURRENT_GAME_STATS_SEASON_ID,
+      points,
+      now,
+      String(userId),
+      gameType,
+      stage
+    ),
+
+    env.DB.prepare(`
+      UPDATE game_stage_stats_claims
+      SET applied_at = ?
+      WHERE user_id = ?
+        AND game_type = ?
+        AND stage = ?
+        AND applied_at IS NULL
+    `).bind(
+      now,
+      String(userId),
+      gameType,
+      stage
+    )
+  ]);
+
+  const applied = Number(results?.[1]?.meta?.changes || 0) === 1;
+
+  return {
+    enabled: true,
+    applied,
+    duplicate: !applied,
+    points,
+    season_id: CURRENT_GAME_STATS_SEASON_ID
+  };
 }
 
 function base64UrlEncodeBytes(bytes) {
@@ -259,11 +427,16 @@ export async function routeGameStageProgress(request, env, user) {
 
   const current = await currentProgress(env, user.id, gameType);
   if (current.max_level_unlocked > stage) {
+    const stats = await applyStageStats(env, user.id, gameType, stage);
+
     return new Response(JSON.stringify(responsePayload(current, {
       completed_stage: stage,
       advanced: false,
       duplicate: true,
-      terminal: current.max_level_unlocked >= maxStage
+      terminal: current.max_level_unlocked >= maxStage,
+      stage_points: stats.points,
+      stats_applied: stats.applied,
+      stats_duplicate: stats.enabled ? stats.duplicate : false
     })), {
       status: 200,
       headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
@@ -302,13 +475,17 @@ export async function routeGameStageProgress(request, env, user) {
 
   const updated = await currentProgress(env, user.id, gameType);
   const advanced = !terminal && updated.max_level_unlocked > stage;
+  const stats = await applyStageStats(env, user.id, gameType, stage, now);
 
   return new Response(JSON.stringify(responsePayload(updated, {
     completed_stage: stage,
     advanced,
     duplicate: !terminal && !advanced,
     terminal,
-    next_stage: terminal ? null : updated.max_level_unlocked
+    next_stage: terminal ? null : updated.max_level_unlocked,
+    stage_points: stats.points,
+    stats_applied: stats.applied,
+    stats_duplicate: stats.enabled ? stats.duplicate : false
   })), {
     status: 200,
     headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
