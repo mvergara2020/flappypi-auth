@@ -103,6 +103,17 @@ function normalizeGameType(value) {
     .replace(/[^a-z0-9_]/g, "");
 }
 
+function hasFingerStartContext(body) {
+  const gameType = normalizeGameType(body?.game_type);
+  const stage = normalizeGameType(body?.stage);
+
+  return (
+    gameType === FINGER_GAME ||
+    stage === FINGER_GAME ||
+    stage.startsWith("finger_")
+  );
+}
+
 async function readSessionUserId(request, env) {
   const token = getCookie(request, "session");
   if (!token) return null;
@@ -125,7 +136,7 @@ async function getMaxUnlocked(env, userId, gameType) {
 }
 
 async function forceFingerStartContext(request, env, body) {
-  if (normalizeGameType(body?.game_type) !== FINGER_GAME && String(body?.stage || "") !== FINGER_GAME) {
+  if (!hasFingerStartContext(body)) {
     return { request, body };
   }
 
@@ -149,6 +160,37 @@ async function forceFingerStartContext(request, env, body) {
       body: JSON.stringify(nextBody),
       headers: request.headers
     })
+  };
+}
+
+async function validateSignedGameType(request, env, body) {
+  const bodyGameType = normalizeGameType(body?.game_type);
+  if (!bodyGameType) {
+    return { payload: null, rejection: null };
+  }
+
+  let payload;
+  try {
+    payload = await verifyJWT(body?.gameToken, env.JWT_SECRET);
+  } catch (_) {
+    return { payload: null, rejection: null };
+  }
+
+  const tokenGameType = normalizeGameType(payload?.game_type);
+
+  if (!tokenGameType || tokenGameType === bodyGameType) {
+    return { payload, rejection: null };
+  }
+
+  return {
+    payload,
+    rejection: json(request, {
+      ok: false,
+      code: "GAME_TYPE_MISMATCH",
+      message: "Game type does not match signed game token",
+      token_game_type: tokenGameType,
+      body_game_type: bodyGameType
+    }, 409)
   };
 }
 
@@ -500,11 +542,14 @@ async function handleFetch(request, env, ctx) {
   }
 
   if (url.pathname === "/game/finish" && requestBody) {
-    const flappyRejection = await validateFlappyFinish(request, env, requestBody);
-    if (flappyRejection) return flappyRejection;
+    const signedContext = await validateSignedGameType(request, env, requestBody);
+    if (signedContext.rejection) return signedContext.rejection;
 
     const fingerValidation = await validateFingerFinish(request, env, requestBody);
     if (fingerValidation.rejection) return fingerValidation.rejection;
+
+    const flappyRejection = await validateFlappyFinish(request, env, requestBody);
+    if (flappyRejection) return flappyRejection;
 
     const response = await baseWorker.fetch(workingRequest, env, ctx);
     if (!fingerValidation.payload || !response.ok) return response;
