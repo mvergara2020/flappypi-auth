@@ -14,7 +14,7 @@ const ALLOWED_ORIGINS = new Set([
 function isSharedImageUpload(request) {
   if (request.method !== "POST") return false;
   const path = new URL(request.url).pathname;
-  return path === "/game/photo" || path === "/sponsors";
+  return path === "/game/photo" || path === "/sponsors" || path === "/sponsors/pi-create";
 }
 
 function isSponsorRoute(request) {

@@ -1,6 +1,7 @@
 import { registerGamePhoto, routePlatform } from "./platform.worker.js";
 import { routeSponsors } from "./sponsor.worker.js";
 import { routePhotoView } from "./photo-views.worker.js";
+import { enqueueTelegramPhoto } from "./telegram-photo.worker.js";
 
 const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
 const MAX_PHOTO_COMMENT_CHARS = 100;
@@ -61,6 +62,7 @@ async function ensurePhotoSocialSchema(env) {
 
     await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_game_photos_recent ON game_photos(created_at DESC)`).run();
     await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_game_photos_game_recent ON game_photos(game_type,created_at DESC)`).run();
+    await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_game_photos_owner_recent ON game_photos(owner_user_id,created_at DESC)`).run();
   })().catch(error => {
     photoSocialSchemaPromise = null;
     throw error;
@@ -76,9 +78,29 @@ async function routePhotoFeed(request, env, helpers, url) {
   let user = null;
   try { user = await requireUser(request, env); } catch (_) {}
 
+  const scope = String(url.searchParams.get("scope") || "").trim().toLowerCase();
+  if (scope === "mine" && !user) {
+    return json({ ok: false, code: "AUTH_REQUIRED" }, 401, request, corsHeaders);
+  }
+
   const requestedGame = String(url.searchParams.get("game_type") || "").trim();
   const gameType = requestedGame ? (normalizeGameId(requestedGame) || "") : "";
   const limit = Math.max(1, Math.min(30, Number(url.searchParams.get("limit") || 8)));
+  const page = Math.max(1, Math.min(10000, Math.floor(Number(url.searchParams.get("page") || 1))));
+  const offset = (page - 1) * limit;
+  const wantsPagination = scope === "mine" || url.searchParams.has("page");
+  const filters = [];
+  const filterValues = [];
+
+  if (scope === "mine") {
+    filters.push("p.owner_user_id=?");
+    filterValues.push(user.id);
+  }
+  if (gameType) {
+    filters.push("p.game_type=?");
+    filterValues.push(gameType);
+  }
+  const where = filters.length ? ` WHERE ${filters.join(" AND ")}` : "";
 
   const select = `
     SELECT p.photo_id,p.owner_user_id,p.game_type,p.stage,p.total_points,p.storage_key,p.comment,p.created_at,p.views,p.likes,
@@ -88,14 +110,28 @@ async function routePhotoFeed(request, env, helpers, url) {
     LEFT JOIN users u ON u.id=p.owner_user_id
   `;
 
-  const rows = gameType
-    ? await env.DB.prepare(`${select} WHERE p.game_type=? ORDER BY p.created_at DESC LIMIT ?`).bind(user?.id || "", gameType, limit).all()
-    : await env.DB.prepare(`${select} ORDER BY p.created_at DESC LIMIT ?`).bind(user?.id || "", limit).all();
+  const [rows, countRow] = await Promise.all([
+    env.DB.prepare(`${select}${where} ORDER BY p.created_at DESC LIMIT ? OFFSET ?`)
+      .bind(user?.id || "", ...filterValues, limit, offset).all(),
+    wantsPagination
+      ? env.DB.prepare(`SELECT COUNT(*) AS total FROM game_photos p${where}`).bind(...filterValues).first()
+      : Promise.resolve(null)
+  ]);
+  const total = countRow ? Number(countRow.total || 0) : Number(rows?.results?.length || 0);
+  const pages = Math.max(1, Math.ceil(total / limit));
 
   return json({
     ok: true,
-    scope: gameType ? "game" : "global",
+    scope: scope === "mine" ? "mine" : gameType ? "game" : "global",
     game_type: gameType || null,
+    pagination: {
+      page,
+      limit,
+      total,
+      pages,
+      has_previous: page > 1,
+      has_next: page < pages
+    },
     photos: (rows?.results || []).map(row => ({
       photo_id: row.photo_id,
       game_type: row.game_type,
@@ -119,6 +155,25 @@ function getStagePerformance(attempts) {
   if (count === 1) return { stars: 3, performance: "EXCELLENT" };
   if (count <= 3) return { stars: 2, performance: "GOOD" };
   return { stars: 1, performance: "CLEARED" };
+}
+
+function activeStageBoostMultiplier(user, now = Date.now()) {
+  const multiplier = Number(user?.boost_multiplier || user?.active_boost?.multiplier || 0);
+  const expiresAt = Number(user?.boost_expires_at || user?.active_boost?.expires_at || 0);
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) return 1;
+  return [3, 5, 8].includes(multiplier) ? multiplier : 1;
+}
+
+function stageRewardPayload(storedStars, attempts) {
+  const ratingStars = getStagePerformance(attempts).stars;
+  const awardedStars = Math.max(ratingStars, Number(storedStars || ratingStars));
+  const inferredMultiplier = awardedStars / ratingStars;
+  return {
+    stars: ratingStars,
+    rating_stars: ratingStars,
+    stars_awarded: awardedStars,
+    boost_multiplier: [3, 5, 8].includes(inferredMultiplier) ? inferredMultiplier : 1
+  };
 }
 
 function ensureStageStarSchema(env) {
@@ -162,12 +217,13 @@ async function routeStageStars(request, env, helpers, url) {
 
   if (existing?.applied_at) {
     const totals = await env.DB.prepare(`SELECT COALESCE(total_score,0) AS total_score, COALESCE(tops_season_score,0) AS tops_season_score FROM users WHERE id = ?`).bind(user.id).first();
+    const rewardMeta = stageRewardPayload(existing.stars, existing.attempts);
     return json({
       ok: true,
       game_uid: gameUid,
       game_type: existing.game_type,
       stage: Number(existing.level_id || 0),
-      stars: Number(existing.stars || 0),
+      ...rewardMeta,
       performance: existing.performance || "CLEARED",
       attempts: Number(existing.attempts || 1),
       total_score: Number(totals?.total_score || 0),
@@ -205,12 +261,14 @@ async function routeStageStars(request, env, helpers, url) {
   const attempts = Math.max(1, Number(attemptsRow?.attempts || 1));
   const rating = getStagePerformance(attempts);
   const now = Date.now();
+  const boostMultiplier = activeStageBoostMultiplier(user, now);
+  const awardedStars = rating.stars * boostMultiplier;
 
   await env.DB.prepare(`
     INSERT OR IGNORE INTO game_stage_star_rewards (
       game_uid,user_id,game_type,level_id,stars,performance,attempts,created_at,applied_at
     ) VALUES (?,?,?,?,?,?,?,?,NULL)
-  `).bind(gameUid, user.id, gameType, stage, rating.stars, rating.performance, attempts, now).run();
+  `).bind(gameUid, user.id, gameType, stage, awardedStars, rating.performance, attempts, now).run();
 
   await env.DB.batch([
     env.DB.prepare(`
@@ -234,7 +292,7 @@ async function routeStageStars(request, env, helpers, url) {
     game_uid: gameUid,
     game_type: reward?.game_type || gameType,
     stage: Number(reward?.level_id || stage),
-    stars: Number(reward?.stars || rating.stars),
+    ...stageRewardPayload(reward?.stars || awardedStars, reward?.attempts || attempts),
     performance: reward?.performance || rating.performance,
     attempts: Number(reward?.attempts || attempts),
     total_score: Number(totals?.total_score || 0),
@@ -318,7 +376,31 @@ export async function routeGamePhoto(request, env, helpers = {}) {
       return json({ ok: false, code: "PHOTO_INDEX_FAILED" }, 500, request, corsHeaders);
     }
 
-    return json({ ok: true, photo_id: photoId, content_type: contentType, size: bytes.byteLength, storage_key: key, comment, url: `${url.origin}/game/photo/${fileName}` }, 201, request, corsHeaders);
+    let telegram = { environment: "localhost", enabled: false, status: "not_scheduled" };
+    try {
+      telegram = await enqueueTelegramPhoto(env, { photoId }, request.url);
+    } catch (error) {
+      console.error("[TELEGRAM PHOTO SCHEDULE ERROR]", {
+        photo_id: photoId,
+        message: String(error?.message || error)
+      });
+      telegram = {
+        environment: String(env?.PHOTO_TELEGRAM_ENV || env?.ENV || "localhost"),
+        enabled: true,
+        status: "schedule_failed"
+      };
+    }
+
+    return json({
+      ok: true,
+      photo_id: photoId,
+      content_type: contentType,
+      size: bytes.byteLength,
+      storage_key: key,
+      comment,
+      url: `${url.origin}/game/photo/${fileName}`,
+      telegram
+    }, 201, request, corsHeaders);
   }
 
   const photoMatch = url.pathname.match(/^\/game\/photo\/([0-9a-f-]{36}\.(?:jpg|png|webp))$/i);

@@ -40,11 +40,20 @@ const GAME_ALIASES = Object.freeze({
 });
 
 let stageStatsSchemaPromise = null;
+let runStatsSchemaPromise = null;
+let optionalStarSchemaPromise = null;
 
 function normalizeGameType(value) {
   const raw = String(value || "").trim().toLowerCase().replace(/\s+/g, "_");
   const normalized = raw.replace(/-/g, "_").replace(/[^a-z0-9_]/g, "");
   return GAME_ALIASES[raw] || GAME_ALIASES[normalized] || normalized;
+}
+
+function activeBoostMultiplier(user, now = Date.now()) {
+  const multiplier = Number(user?.boost_multiplier || user?.active_boost?.multiplier || 0);
+  const expiresAt = Number(user?.boost_expires_at || user?.active_boost?.expires_at || 0);
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) return 1;
+  return [3, 5, 8].includes(multiplier) ? multiplier : 1;
 }
 
 function fruitsMemoryStagePoints(stage) {
@@ -82,8 +91,9 @@ function ensureStageStatsSchema(env) {
   return stageStatsSchemaPromise;
 }
 
-async function applyStageStats(env, userId, gameType, stage, now = Date.now()) {
-  const points = officialStagePoints(gameType, stage);
+async function applyStageStats(env, userId, gameType, stage, boostMultiplier = 1, now = Date.now()) {
+  const basePoints = officialStagePoints(gameType, stage);
+  const points = basePoints * boostMultiplier;
 
   if (!Number.isInteger(points) || points <= 0) {
     return {
@@ -91,6 +101,8 @@ async function applyStageStats(env, userId, gameType, stage, now = Date.now()) {
       applied: false,
       duplicate: false,
       points: 0,
+      base_points: 0,
+      boost_multiplier: boostMultiplier,
       season_id: CURRENT_GAME_STATS_SEASON_ID
     };
   }
@@ -208,7 +220,198 @@ async function applyStageStats(env, userId, gameType, stage, now = Date.now()) {
     applied,
     duplicate: !applied,
     points,
+    base_points: basePoints,
+    boost_multiplier: boostMultiplier,
     season_id: CURRENT_GAME_STATS_SEASON_ID
+  };
+}
+
+function normalizeRunScore(value) {
+  const score = Number(value);
+  if (!Number.isFinite(score)) return 0;
+  return Math.max(0, Math.min(1000000, Math.floor(score)));
+}
+
+function ensureRunStatsSchema(env) {
+  if (runStatsSchemaPromise) return runStatsSchemaPromise;
+  runStatsSchemaPromise = env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS game_stage_run_scores (
+      run_nonce TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      game_type TEXT NOT NULL,
+      stage INTEGER NOT NULL,
+      points INTEGER NOT NULL DEFAULT 0,
+      completed INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      applied_at INTEGER
+    )
+  `).run().catch(error => {
+    runStatsSchemaPromise = null;
+    throw error;
+  });
+  return runStatsSchemaPromise;
+}
+
+async function applyRunStats(env, userId, gameType, stage, nonce, rawScore, completed, boostMultiplier = 1, now = Date.now()) {
+  if (gameType !== "snake_999") {
+    return { enabled: false, applied: false, duplicate: false, points: 0 };
+  }
+
+  const basePoints = normalizeRunScore(rawScore);
+  const points = basePoints * boostMultiplier;
+  await ensureRunStatsSchema(env);
+  const results = await env.DB.batch([
+    env.DB.prepare(`
+      INSERT OR IGNORE INTO game_stage_run_scores (
+        run_nonce, user_id, game_type, stage, points, completed, created_at, applied_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, NULL)
+    `).bind(String(nonce), String(userId), gameType, stage, points, completed ? 1 : 0, now),
+    env.DB.prepare(`
+      INSERT INTO user_game_stats (
+        user_id, game_type, total_points, season_points, season_id,
+        best_score, total_pipes, games_played, updated_at
+      )
+      SELECT ?, ?, ?, ?, ?, ?, 0, 1, ?
+      WHERE EXISTS (
+        SELECT 1 FROM game_stage_run_scores
+        WHERE run_nonce = ? AND user_id = ? AND applied_at IS NULL
+      )
+      ON CONFLICT(user_id, game_type) DO UPDATE SET
+        total_points = user_game_stats.total_points + excluded.total_points,
+        season_points = CASE
+          WHEN user_game_stats.season_id = excluded.season_id
+          THEN user_game_stats.season_points + excluded.season_points
+          ELSE excluded.season_points
+        END,
+        season_id = excluded.season_id,
+        best_score = MAX(user_game_stats.best_score, excluded.best_score),
+        games_played = user_game_stats.games_played + 1,
+        updated_at = excluded.updated_at
+    `).bind(
+      String(userId), gameType, points, points, CURRENT_GAME_STATS_SEASON_ID,
+      points, now, String(nonce), String(userId)
+    ),
+    env.DB.prepare(`
+      UPDATE game_stage_run_scores
+      SET applied_at = ?
+      WHERE run_nonce = ? AND user_id = ? AND applied_at IS NULL
+    `).bind(now, String(nonce), String(userId))
+  ]);
+
+  const applied = Number(results?.[1]?.meta?.changes || 0) === 1;
+  const stats = await env.DB.prepare(`
+    SELECT total_points, season_points, best_score, games_played
+    FROM user_game_stats WHERE user_id = ? AND game_type = ? LIMIT 1
+  `).bind(String(userId), gameType).first();
+
+  return {
+    enabled: true,
+    applied,
+    duplicate: !applied,
+    points,
+    base_points: basePoints,
+    boost_multiplier: boostMultiplier,
+    total_points: Number(stats?.total_points || 0),
+    season_points: Number(stats?.season_points || 0),
+    best_score: Number(stats?.best_score || 0),
+    games_played: Number(stats?.games_played || 0)
+  };
+}
+
+function ensureOptionalStarSchema(env) {
+  if (optionalStarSchemaPromise) return optionalStarSchemaPromise;
+  optionalStarSchemaPromise = env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS game_stage_star_rewards (
+      game_uid TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      game_type TEXT NOT NULL,
+      level_id INTEGER NOT NULL,
+      stars INTEGER NOT NULL,
+      performance TEXT NOT NULL,
+      attempts INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      applied_at INTEGER
+    )
+  `).run().catch(error => {
+    optionalStarSchemaPromise = null;
+    throw error;
+  });
+  return optionalStarSchemaPromise;
+}
+
+function ratingForAttempts(attempts) {
+  const count = Math.max(1, Number(attempts || 1));
+  if (count === 1) return { stars: 3, performance: "EXCELLENT" };
+  if (count <= 3) return { stars: 2, performance: "GOOD" };
+  return { stars: 1, performance: "CLEARED" };
+}
+
+async function applySnakeStageStars(env, userId, stage, nonce, boostMultiplier = 1, now = Date.now()) {
+  await Promise.all([ensureRunStatsSchema(env), ensureOptionalStarSchema(env)]);
+  const gameUid = `snake:${String(nonce)}`;
+  const attemptsRow = await env.DB.prepare(`
+    SELECT COUNT(*) AS attempts
+    FROM game_stage_run_scores
+    WHERE user_id = ? AND game_type = 'snake_999' AND stage = ? AND applied_at IS NOT NULL
+  `).bind(String(userId), stage).first();
+  const attempts = Math.max(1, Number(attemptsRow?.attempts || 1));
+  const rating = ratingForAttempts(attempts);
+  const awardedStars = rating.stars * boostMultiplier;
+
+  await env.DB.batch([
+    env.DB.prepare(`
+      INSERT OR IGNORE INTO game_stage_star_rewards (
+        game_uid,user_id,game_type,level_id,stars,performance,attempts,created_at,applied_at
+      ) VALUES (?,?,'snake_999',?,?,?,?,?,NULL)
+    `).bind(gameUid, String(userId), stage, awardedStars, rating.performance, attempts, now),
+    env.DB.prepare(`
+      UPDATE users SET
+        total_score = COALESCE(total_score,0) + (
+          SELECT stars FROM game_stage_star_rewards
+          WHERE game_uid = ? AND user_id = ? AND applied_at IS NULL
+        ),
+        tops_season_score = COALESCE(tops_season_score,0) + (
+          SELECT stars FROM game_stage_star_rewards
+          WHERE game_uid = ? AND user_id = ? AND applied_at IS NULL
+        )
+      WHERE id = ? AND EXISTS (
+        SELECT 1 FROM game_stage_star_rewards
+        WHERE game_uid = ? AND user_id = ? AND applied_at IS NULL
+      )
+    `).bind(gameUid, String(userId), gameUid, String(userId), String(userId), gameUid, String(userId)),
+    env.DB.prepare(`
+      UPDATE game_stage_star_rewards SET applied_at = ?
+      WHERE game_uid = ? AND user_id = ? AND applied_at IS NULL
+    `).bind(now, gameUid, String(userId))
+  ]);
+
+  const [reward, totals] = await Promise.all([
+    env.DB.prepare(`
+      SELECT stars,performance,attempts,applied_at
+      FROM game_stage_star_rewards WHERE game_uid = ? AND user_id = ? LIMIT 1
+    `).bind(gameUid, String(userId)).first(),
+    env.DB.prepare(`
+      SELECT COALESCE(total_score,0) AS total_score,
+             COALESCE(tops_season_score,0) AS tops_season_score
+      FROM users WHERE id = ? LIMIT 1
+    `).bind(String(userId)).first()
+  ]);
+
+  const storedStars = Number(reward?.stars || awardedStars);
+  const storedRating = ratingForAttempts(reward?.attempts || attempts);
+  const inferredMultiplier = storedStars / storedRating.stars;
+
+  return {
+    game_uid: gameUid,
+    stars: storedRating.stars,
+    rating_stars: storedRating.stars,
+    stars_awarded: storedStars,
+    boost_multiplier: [3, 5, 8].includes(inferredMultiplier) ? inferredMultiplier : 1,
+    performance: reward?.performance || rating.performance,
+    attempts: Number(reward?.attempts || attempts),
+    total_score: Number(totals?.total_score || 0),
+    tops_season_score: Number(totals?.tops_season_score || 0),
+    stars_applied: Number(reward?.applied_at || 0) > 0
   };
 }
 
@@ -342,7 +545,7 @@ function responsePayload(progress, extra = {}) {
 export async function routeGameStageProgress(request, env, user) {
   const url = new URL(request.url);
   if (request.method !== "POST") return null;
-  if (url.pathname !== "/game/stage/start" && url.pathname !== "/game/stage/finish") return null;
+  if (!["/game/stage/start", "/game/stage/score", "/game/stage/finish"].includes(url.pathname)) return null;
 
   if (!user?.id) {
     return new Response(JSON.stringify({ ok: false, code: "UNAUTHORIZED" }), {
@@ -359,6 +562,8 @@ export async function routeGameStageProgress(request, env, user) {
       headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
     });
   }
+
+  const requestBoostMultiplier = activeBoostMultiplier(user);
 
   if (url.pathname === "/game/stage/start") {
     const gameType = normalizeGameType(body?.game_type || body?.game);
@@ -426,8 +631,45 @@ export async function routeGameStageProgress(request, env, user) {
   }
 
   const current = await currentProgress(env, user.id, gameType);
+  if (url.pathname === "/game/stage/score") {
+    if (gameType !== "snake_999") {
+      return new Response(JSON.stringify({ ok: false, code: "RUN_SCORE_NOT_SUPPORTED" }), {
+        status: 409,
+        headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
+      });
+    }
+    if (current.max_level_unlocked !== stage) {
+      return new Response(JSON.stringify({
+        ok: false,
+        code: "STAGE_PROGRESS_MISMATCH",
+        expected_stage: current.max_level_unlocked,
+        token_stage: stage
+      }), {
+        status: 409,
+        headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
+      });
+    }
+    const run = await applyRunStats(env, user.id, gameType, stage, payload.nonce, body?.score, false, requestBoostMultiplier);
+    return new Response(JSON.stringify(responsePayload(current, {
+      score_points: run.points,
+      stats_applied: run.applied,
+      stats_duplicate: run.duplicate,
+      total_points: run.total_points,
+      season_points: run.season_points,
+      best_score: run.best_score,
+      games_played: run.games_played
+    })), {
+      status: 200,
+      headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
+    });
+  }
+
   if (current.max_level_unlocked > stage) {
-    const stats = await applyStageStats(env, user.id, gameType, stage);
+    const stats = await applyStageStats(env, user.id, gameType, stage, requestBoostMultiplier);
+    const run = await applyRunStats(env, user.id, gameType, stage, payload.nonce, body?.score, true, requestBoostMultiplier);
+    const starReward = gameType === "snake_999"
+      ? await applySnakeStageStars(env, user.id, stage, payload.nonce, requestBoostMultiplier)
+      : {};
 
     return new Response(JSON.stringify(responsePayload(current, {
       completed_stage: stage,
@@ -436,7 +678,12 @@ export async function routeGameStageProgress(request, env, user) {
       terminal: current.max_level_unlocked >= maxStage,
       stage_points: stats.points,
       stats_applied: stats.applied,
-      stats_duplicate: stats.enabled ? stats.duplicate : false
+      stats_duplicate: stats.enabled ? stats.duplicate : run.duplicate,
+      score_points: run.points,
+      total_points: run.total_points,
+      best_score: run.best_score,
+      games_played: run.games_played,
+      ...starReward
     })), {
       status: 200,
       headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }
@@ -475,7 +722,11 @@ export async function routeGameStageProgress(request, env, user) {
 
   const updated = await currentProgress(env, user.id, gameType);
   const advanced = !terminal && updated.max_level_unlocked > stage;
-  const stats = await applyStageStats(env, user.id, gameType, stage, now);
+  const stats = await applyStageStats(env, user.id, gameType, stage, requestBoostMultiplier, now);
+  const run = await applyRunStats(env, user.id, gameType, stage, payload.nonce, body?.score, true, requestBoostMultiplier, now);
+  const starReward = gameType === "snake_999"
+    ? await applySnakeStageStars(env, user.id, stage, payload.nonce, requestBoostMultiplier, now)
+    : {};
 
   return new Response(JSON.stringify(responsePayload(updated, {
     completed_stage: stage,
@@ -484,8 +735,13 @@ export async function routeGameStageProgress(request, env, user) {
     terminal,
     next_stage: terminal ? null : updated.max_level_unlocked,
     stage_points: stats.points,
-    stats_applied: stats.applied,
-    stats_duplicate: stats.enabled ? stats.duplicate : false
+    stats_applied: stats.enabled ? stats.applied : run.applied,
+    stats_duplicate: stats.enabled ? stats.duplicate : run.duplicate,
+    score_points: run.points,
+    total_points: run.total_points,
+    best_score: run.best_score,
+    games_played: run.games_played,
+    ...starReward
   })), {
     status: 200,
     headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }

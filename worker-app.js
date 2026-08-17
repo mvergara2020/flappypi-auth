@@ -285,7 +285,7 @@ async function maybePersistLanguageFromProfileUpdate(request, env, ctx, url) {
 async function routeSharedGameStage(request, env, ctx, url) {
   if (
     request.method !== "POST" ||
-    (url.pathname !== "/game/stage/start" && url.pathname !== "/game/stage/finish")
+    !["/game/stage/start", "/game/stage/score", "/game/stage/finish"].includes(url.pathname)
   ) return null;
 
   const user = await getCoreUser(request, env, ctx);

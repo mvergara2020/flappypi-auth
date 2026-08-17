@@ -11,6 +11,10 @@ database_id = "6bcb42bd-529f-4af5-bd4d-882c4e91790b"
 binding = "GAME_POINTS_QUEUE"
 queue = "flappypi-game-points"
 
+[[queues.producers]]
+binding = "TELEGRAM_PHOTO_QUEUE"
+queue = "flappypi-photo-telegram-mainnet"
+
 [[queues.consumers]]
 queue = "flappypi-game-points"
 max_batch_size = 100
@@ -19,12 +23,23 @@ max_retries = 10
 max_concurrency = 1
 dead_letter_queue = "flappypi-game-points-dlq"
 
+[[queues.consumers]]
+queue = "flappypi-photo-telegram-mainnet"
+max_batch_size = 5
+max_batch_timeout = 1
+max_retries = 10
+max_concurrency = 2
+dead_letter_queue = "flappypi-photo-telegram-mainnet-dlq"
+
 [[r2_buckets]]
 binding = "GAME_PHOTOS"
 bucket_name = "flappypi-game-photos"
 
 [vars]
 ENV = "dev"
+PHOTO_TELEGRAM_ENV = "mainnet"
+TELEGRAM_ENABLED = "true"
+TELEGRAM_LOCAL_ENABLED = "false"
 
 # ================================
 # ENVIRONMENT: QA
@@ -37,6 +52,9 @@ routes = [
 
 [env.qa.vars]
 ENV = "qa"
+PHOTO_TELEGRAM_ENV = "testnet"
+TELEGRAM_ENABLED = "true"
+TELEGRAM_LOCAL_ENABLED = "false"
 
 [[env.qa.d1_databases]]
 binding = "DB"
@@ -47,6 +65,10 @@ database_id = "efcadca4-7074-42ae-b1e2-8595073e5d55"
 binding = "GAME_POINTS_QUEUE"
 queue = "flappypi-game-points-qa"
 
+[[env.qa.queues.producers]]
+binding = "TELEGRAM_PHOTO_QUEUE"
+queue = "flappypi-photo-telegram-testnet"
+
 [[env.qa.queues.consumers]]
 queue = "flappypi-game-points-qa"
 max_batch_size = 100
@@ -54,6 +76,14 @@ max_batch_timeout = 20
 max_retries = 10
 max_concurrency = 1
 dead_letter_queue = "flappypi-game-points-qa-dlq"
+
+[[env.qa.queues.consumers]]
+queue = "flappypi-photo-telegram-testnet"
+max_batch_size = 5
+max_batch_timeout = 1
+max_retries = 10
+max_concurrency = 2
+dead_letter_queue = "flappypi-photo-telegram-testnet-dlq"
 
 [[env.qa.r2_buckets]]
 binding = "GAME_PHOTOS"

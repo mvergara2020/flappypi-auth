@@ -3,6 +3,13 @@ import baseWorker from "./worker.js";
 const MAX_STAGE = 999;
 const FINGER_GAME = "finger_trace";
 const FLAPPY_GAMES = new Set(["flappy_classic", "webcam_flappy"]);
+const CURRENT_GAME_STATS_SEASON_ID = "S5";
+const GAME_TOP_CACHE_TTL_MS = 30000;
+const GAME_TOP_TYPES = new Set([
+  "flappy_classic", "webcam_flappy", "finger_trace", "fruits_memory",
+  "snake_999", "jelly_fusion", "tetriz_999", "flappypi_999", "fusion_999"
+]);
+const gameTopMemoryCache = new Map();
 const ALLOWED_ORIGINS = new Set([
   "http://localhost:3000",
   "https://192.168.1.81:3000",
@@ -103,6 +110,98 @@ function normalizeGameType(value) {
     .replace(/[^a-z0-9_]/g, "");
 }
 
+async function readCachedGameTop(request, env, gameType) {
+  const memory = gameTopMemoryCache.get(gameType);
+  if (memory && memory.expiresAt > Date.now()) return memory.payload;
+
+  if (env.ENV === "dev" || typeof caches === "undefined") return null;
+  try {
+    const key = new Request(`https://game-top-cache.flappypi.internal/${gameType}`);
+    const cached = await caches.default.match(key);
+    if (!cached) return null;
+    const payload = await cached.json();
+    gameTopMemoryCache.set(gameType, {
+      payload,
+      expiresAt:Date.now() + GAME_TOP_CACHE_TTL_MS
+    });
+    return payload;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function writeCachedGameTop(env, ctx, gameType, payload) {
+  gameTopMemoryCache.set(gameType, {
+    payload,
+    expiresAt:Date.now() + GAME_TOP_CACHE_TTL_MS
+  });
+
+  if (env.ENV === "dev" || typeof caches === "undefined") return;
+  const write = async () => {
+    try {
+      const key = new Request(`https://game-top-cache.flappypi.internal/${gameType}`);
+      await caches.default.put(key, new Response(JSON.stringify(payload), {
+        headers:{
+          "Content-Type":"application/json; charset=utf-8",
+          "Cache-Control":`public, max-age=${Math.floor(GAME_TOP_CACHE_TTL_MS / 1000)}`
+        }
+      }));
+    } catch (_) {}
+  };
+  if (ctx?.waitUntil) ctx.waitUntil(write());
+  else await write();
+}
+
+async function maybeHandleGameTop(request, env, ctx) {
+  const url = new URL(request.url);
+  if (request.method !== "GET" || url.pathname !== "/tops/game") return null;
+
+  const gameType = normalizeGameType(url.searchParams.get("game_type"));
+  const requestedLimit = Math.max(1, Math.min(20, Number(url.searchParams.get("limit")) || 3));
+  if (!GAME_TOP_TYPES.has(gameType)) {
+    return json(request, { ok:false, code:"INVALID_GAME_TYPE" }, 400);
+  }
+
+  const freshRequested = url.searchParams.get("fresh") === "1";
+  const authenticatedFresh = freshRequested && !!(await readSessionUserId(request, env));
+  let payload = authenticatedFresh ? null : await readCachedGameTop(request, env, gameType);
+  let cacheStatus = authenticatedFresh ? "REFRESH" : "HIT";
+  if (!payload) {
+    const rows = await env.DB.prepare(`
+      SELECT
+        u.name,
+        u.user_name,
+        u.bird_color,
+        s.game_type,
+        COALESCE(s.season_points, 0) AS season_points,
+        COALESCE(s.total_points, 0) AS total_points,
+        COALESCE(s.best_score, 0) AS best_score,
+        COALESCE(s.games_played, 0) AS games_played
+      FROM user_game_stats s
+      INNER JOIN users u ON u.id = s.user_id
+      WHERE s.game_type = ?
+        AND s.season_id = ?
+        AND COALESCE(s.season_points, 0) > 0
+      ORDER BY s.season_points DESC, s.updated_at ASC
+      LIMIT 20
+    `).bind(gameType, CURRENT_GAME_STATS_SEASON_ID).all();
+
+    payload = {
+      ok:true,
+      game_type:gameType,
+      season_id:CURRENT_GAME_STATS_SEASON_ID,
+      top:rows.results || []
+    };
+    if (!authenticatedFresh) cacheStatus = "MISS";
+    await writeCachedGameTop(env, ctx, gameType, payload);
+  }
+
+  return json(request, { ...payload, top:payload.top.slice(0, requestedLimit) }, 200, {
+    "Cache-Control":authenticatedFresh ? "no-store" : "private, max-age=30",
+    "X-FlappyPi-Top-Cache":cacheStatus
+  });
+}
+
 async function readSessionUserId(request, env) {
   const token = getCookie(request, "session");
   if (!token) return null;
@@ -154,6 +253,7 @@ async function forceFingerStartContext(request, env, body) {
 
 async function validateFlappyFinish(request, env, body) {
   if (body?.complete_game !== true) return null;
+  if (normalizeGameType(body?.game_type) === FINGER_GAME) return null;
 
   let payload;
   try { payload = await verifyJWT(body?.gameToken, env.JWT_SECRET); }
@@ -481,6 +581,9 @@ async function rewriteMeResponse(response) {
 
 async function handleFetch(request, env, ctx) {
   const url = new URL(request.url);
+
+  const gameTop = await maybeHandleGameTop(request, env, ctx);
+  if (gameTop) return gameTop;
 
   const fingerStars = await maybeHandleFingerStageStars(request, env);
   if (fingerStars) return fingerStars;

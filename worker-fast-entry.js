@@ -107,7 +107,13 @@ export default {
         env: env?.ENV || null,
         has_db: !!env?.DB,
         has_queue: !!env?.GAME_POINTS_QUEUE,
+        has_telegram_photo_queue: !!env?.TELEGRAM_PHOTO_QUEUE,
         has_r2: !!env?.GAME_PHOTOS,
+        telegram_environment: env?.PHOTO_TELEGRAM_ENV || null,
+        telegram_enabled: String(env?.TELEGRAM_ENABLED || "").toLowerCase() === "true",
+        telegram_local_enabled: String(env?.TELEGRAM_LOCAL_ENABLED || "").toLowerCase() === "true",
+        has_telegram_bot_token: !!String(env?.TELEGRAM_BOT_TOKEN || "").trim(),
+        has_telegram_chat_id: !!String(env?.TELEGRAM_CHAT_ID || "").trim(),
         has_coingecko_demo_key: !!String(env?.COINGECKO_DEMO_API_KEY || "").trim(),
         url: request.url,
         now: Date.now()

@@ -12,6 +12,20 @@ CREATE TABLE IF NOT EXISTS user_language_preferences (
   updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS platform_seasons (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  starts_at INTEGER NOT NULL,
+  ends_at INTEGER NOT NULL,
+  pro_usd_cents INTEGER NOT NULL DEFAULT 400,
+  pro_price_flappycoins INTEGER NOT NULL DEFAULT 120000,
+  stars_per_tier INTEGER NOT NULL DEFAULT 3,
+  status TEXT NOT NULL DEFAULT 'SCHEDULED',
+  rules_pdf_url TEXT,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS season_passes (
   user_id TEXT NOT NULL,
   season_id TEXT NOT NULL,
@@ -19,7 +33,7 @@ CREATE TABLE IF NOT EXISTS season_passes (
   payment_id TEXT,
   txid TEXT,
   paid_pi REAL,
-  paid_usd_cents INTEGER NOT NULL DEFAULT 499,
+  paid_usd_cents INTEGER NOT NULL DEFAULT 350,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   PRIMARY KEY (user_id, season_id)
@@ -73,6 +87,33 @@ CREATE TABLE IF NOT EXISTS collaborator_supports (
   code TEXT NOT NULL,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS collaborator_cycles (
+  id TEXT PRIMARY KEY,
+  starts_at INTEGER NOT NULL,
+  ends_at INTEGER NOT NULL,
+  recognized_revenue_usd_cents INTEGER NOT NULL DEFAULT 0,
+  reward_pool_bps INTEGER NOT NULL DEFAULT 1000,
+  reward_pool_usd_cents INTEGER,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  finalized_at INTEGER,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS collaborator_monthly_rewards (
+  cycle_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  rank_no INTEGER NOT NULL,
+  supporters INTEGER NOT NULL,
+  share_ratio REAL NOT NULL,
+  reward_usd_cents INTEGER NOT NULL,
+  status TEXT NOT NULL DEFAULT 'PENDING',
+  payment_reference TEXT,
+  created_at INTEGER NOT NULL,
+  paid_at INTEGER,
+  PRIMARY KEY (cycle_id,user_id)
 );
 
 CREATE TABLE IF NOT EXISTS game_photos (

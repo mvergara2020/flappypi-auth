@@ -5,6 +5,7 @@ import {
 } from "./levels.js";
 import { routeDailyRewards } from "./daily-rewards.worker.js";
 import { routeGamePhoto } from "./game-photo.worker.js";
+import { consumeTelegramPhotoBatch, isTelegramPhotoBatch } from "./telegram-photo.worker.js";
 
 //const FRONTEND_ORIGIN = "http://localhost:3000";
 const FRONTEND_ORIGIN = "http://192.168.1.81:3000";
@@ -634,8 +635,21 @@ async function enqueueGameProgress({
     throw new Error("GAME_PROGRESS_EXPIRED");
   }
 
-  const cumulativePoints =
+  const boostMultiplier =
+    getActiveBoostMultiplierFromUser(user, now);
+
+  const baseCumulativePoints =
     cumulativeMetric * game.pointsPerUnit;
+
+  const baseDeltaPoints =
+    (cumulativeMetric - previousMetric) *
+    game.pointsPerUnit;
+
+  const deltaPoints =
+    baseDeltaPoints * boostMultiplier;
+
+  const cumulativePoints =
+    previousPoints + deltaPoints;
 
   const maxAllowedPoints =
     Math.floor(
@@ -643,7 +657,7 @@ async function enqueueGameProgress({
     ) +
     GAME_PROGRESS_TIME_GRACE_POINTS;
 
-  if (cumulativePoints > maxAllowedPoints) {
+  if (baseCumulativePoints > maxAllowedPoints) {
     throw new Error(
       "GAME_PROGRESS_TIME_ANOMALY"
     );
@@ -651,9 +665,6 @@ async function enqueueGameProgress({
 
   const deltaMetric =
     cumulativeMetric - previousMetric;
-
-  const deltaPoints =
-    cumulativePoints - previousPoints;
 
   /*
     No mandamos mensajes vacíos durante la partida.
@@ -672,6 +683,7 @@ async function enqueueGameProgress({
       cumulativePoints,
       deltaMetric: 0,
       deltaPoints: 0,
+      boostMultiplier,
       receiptToken
     };
   }
@@ -699,6 +711,9 @@ async function enqueueGameProgress({
 
     cumulative_points:
       cumulativePoints,
+
+    boost_multiplier:
+      boostMultiplier,
 
     started_at:
       startedAt,
@@ -768,6 +783,7 @@ async function enqueueGameProgress({
     cumulativePoints,
     deltaMetric,
     deltaPoints,
+    boostMultiplier,
     receiptToken: nextReceiptToken
   };
 }
@@ -976,6 +992,14 @@ async function consolidateGamePointsEvent(
     event?.cumulative_metric
   );
 
+  const incomingPoints = Number(
+    event?.cumulative_points
+  );
+
+  const eventBoostMultiplier = Number(
+    event?.boost_multiplier || 1
+  );
+
   const startedAt = Number(
     event?.started_at
   );
@@ -997,8 +1021,12 @@ async function consolidateGamePointsEvent(
       game.scoringVersion ||
     !Number.isInteger(incomingSeq) ||
     !Number.isInteger(incomingMetric) ||
+    !Number.isInteger(incomingPoints) ||
     incomingSeq < 1 ||
     incomingMetric < 0 ||
+    incomingPoints < 0 ||
+    incomingPoints > incomingMetric * game.pointsPerUnit * 8 ||
+    ![1, 3, 5, 8].includes(eventBoostMultiplier) ||
     !Number.isFinite(startedAt)
   ) {
     throw new Error(
@@ -1057,8 +1085,16 @@ async function consolidateGamePointsEvent(
     incomingMetric
   );
 
-  const newPoints =
-    newMetric * game.pointsPerUnit;
+  /*
+    Points are signed into the server receipt before entering the Queue.
+    They may include different boost windows during the same run, so the
+    authoritative cumulative value cannot be reconstructed from the last
+    multiplier alone.
+  */
+  const newPoints = Math.max(
+    oldPoints,
+    incomingPoints
+  );
 
   const deltaMetric = Math.max(
     0,
@@ -1631,6 +1667,18 @@ function getActiveBoostRow(row) {
     expires_at: Number(row.boost_expires_at),
     source: row.boost_source || null
   };
+}
+
+function getActiveBoostMultiplierFromUser(user, now = Date.now()) {
+  const directMultiplier = Number(user?.boost_multiplier || 0);
+  const directExpiresAt = Number(user?.boost_expires_at || 0);
+  const nestedMultiplier = Number(user?.active_boost?.multiplier || 0);
+  const nestedExpiresAt = Number(user?.active_boost?.expires_at || 0);
+  const multiplier = directMultiplier || nestedMultiplier;
+  const expiresAt = directExpiresAt || nestedExpiresAt;
+
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) return 1;
+  return [3, 5, 8].includes(multiplier) ? multiplier : 1;
 }
 
 function makeDuelPublicId() {
@@ -2304,7 +2352,9 @@ async function requireUser(request, env) {
   }
 
   const user = await env.DB.prepare(
-    "SELECT id, email, user_name, total_score, welcome_claimed FROM users WHERE id = ?"
+    `SELECT id, email, user_name, total_score, welcome_claimed,
+            boost_multiplier, boost_expires_at, boost_source
+     FROM users WHERE id = ?`
   )
     .bind(payload.sub)
     .first();
@@ -4837,6 +4887,9 @@ if (game.id !== "legacy") {
       points_accepted:
         progress.deltaPoints,
 
+      boost_multiplier:
+        progress.boostMultiplier,
+
       sync_status:
       progress.confirmed
         ? "confirmed"
@@ -5209,6 +5262,9 @@ if (game.id !== "legacy") {
 
     points_accepted:
       progress.deltaPoints,
+
+    boost_multiplier:
+      progress.boostMultiplier,
 
     sync_status:
       progress.confirmed
@@ -7302,6 +7358,10 @@ if (game.id !== "legacy") {
 },
 
 async queue(batch, env) {
+  if (isTelegramPhotoBatch(batch)) {
+    await consumeTelegramPhotoBatch(batch, env);
+    return;
+  }
   await consumeGamePointsBatch(
     batch,
     env

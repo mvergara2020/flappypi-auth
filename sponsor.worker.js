@@ -2,19 +2,13 @@ import { routeShopCatalog } from "./shop-catalog.worker.js";
 
 const SPONSOR_USD_CENTS = 500;
 const MAX_SPONSOR_BYTES = 5 * 1024 * 1024;
-const MAX_URL_CHARS = 500;
 const MAX_TITLE_CHARS = 60;
+const PAYMENT_INTENT_TTL_MS = 20 * 60 * 1000;
 const SPONSOR_CONTENT_TYPES = new Map([
   ["image/jpeg", "jpg"],
   ["image/png", "png"],
   ["image/webp", "webp"]
 ]);
-const BLOCKED_URL_TERMS = [
-  "porn", "xxx", "adult", "sexcam", "casino", "gambling", "sportsbook",
-  "betting", "bet365", "cocaine", "heroin", "fentanyl", "methamphetamine",
-  "weapon", "firearm", "ammo", "malware", "phishing", "ransomware"
-];
-
 let schemaPromise = null;
 
 function json(data, status, request, corsHeaders) {
@@ -30,6 +24,12 @@ function json(data, status, request, corsHeaders) {
 
 function safeText(value, max) {
   return String(value ?? "").trim().slice(0, max);
+}
+
+async function ensureColumn(env, table, column, definition) {
+  const info = await env.DB.prepare(`PRAGMA table_info(${table})`).all();
+  if ((info?.results || []).some(row => String(row.name) === column)) return;
+  await env.DB.prepare(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`).run();
 }
 
 async function ensureSchema(env) {
@@ -54,6 +54,28 @@ async function ensureSchema(env) {
         clicks INTEGER NOT NULL DEFAULT 0
       )
     `).run();
+    await ensureColumn(env, "user_sponsors", "paid_pi", "REAL");
+    await ensureColumn(env, "user_sponsors", "payment_id", "TEXT");
+    await ensureColumn(env, "user_sponsors", "txid", "TEXT");
+    await env.DB.prepare(`
+      CREATE TABLE IF NOT EXISTS sponsor_payment_intents (
+        id TEXT PRIMARY KEY,
+        user_id TEXT NOT NULL,
+        sponsor_id TEXT NOT NULL UNIQUE,
+        storage_key TEXT NOT NULL UNIQUE,
+        content_type TEXT NOT NULL,
+        expected_pi REAL NOT NULL,
+        pi_usd_price REAL NOT NULL,
+        status TEXT NOT NULL DEFAULT 'CREATED',
+        payment_id TEXT,
+        txid TEXT,
+        expires_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      )
+    `).run();
+    await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_sponsor_payment_intents_user ON sponsor_payment_intents(user_id,created_at DESC)`).run();
+    await env.DB.prepare(`CREATE UNIQUE INDEX IF NOT EXISTS idx_user_sponsors_payment_id ON user_sponsors(payment_id) WHERE payment_id IS NOT NULL`).run();
     await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_user_sponsors_status_recent ON user_sponsors(moderation_status,created_at DESC)`).run();
     await env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_user_sponsors_user_recent ON user_sponsors(user_id,created_at DESC)`).run();
   })().catch(error => {
@@ -64,50 +86,37 @@ async function ensureSchema(env) {
 }
 
 async function sponsorQuote(env) {
-  const internalUrl = new URL("https://internal.flappypi/shop/flappycoin/catalog");
+  const internalUrl = new URL("https://internal.flappypi/shop/flappycoin/pi-price");
   const internalRequest = new Request(internalUrl.href, { method:"GET" });
   const response = await routeShopCatalog(internalRequest, env, internalUrl);
-  if (!response?.ok) throw new Error("SPONSOR_CATALOG_UNAVAILABLE");
-  const catalog = await response.json();
-  const packs = Array.isArray(catalog?.packs) ? catalog.packs : [];
-  const recommended = packs.find(pack => pack.id === catalog?.recommended_pack_id) || packs.find(pack => pack.featured) || packs[0];
-  const rawCoinsPerUsd = Number(recommended?.coins_per_usd || 0);
-  if (!Number.isFinite(rawCoinsPerUsd) || rawCoinsPerUsd <= 0) throw new Error("SPONSOR_RATE_UNAVAILABLE");
-  const coinsPerUsd = Math.round(rawCoinsPerUsd);
-  const coinCost = Math.ceil((SPONSOR_USD_CENTS / 100) * coinsPerUsd);
+  if (!response?.ok) throw new Error("SPONSOR_PI_PRICE_UNAVAILABLE");
+  const price = await response.json();
+  const piUsdPrice = Number(price?.pi_price || 0);
+  if (!Number.isFinite(piUsdPrice) || piUsdPrice <= 0) throw new Error("SPONSOR_PI_PRICE_UNAVAILABLE");
+  const rawAmount = (SPONSOR_USD_CENTS / 100) / piUsdPrice;
+  const amount = Number((Math.ceil((rawAmount - Number.EPSILON) * 100) / 100).toFixed(2));
   return {
-    usd_cents: SPONSOR_USD_CENTS,
-    usd_price: SPONSOR_USD_CENTS / 100,
-    coins_per_usd: coinsPerUsd,
-    coin_cost: coinCost,
-    catalog_version: catalog?.catalog_version || null,
-    rate_pack_id: recommended?.id || null
+    amount,
+    currency:"PI",
+    quoted_at:Date.now(),
+    refresh_after_ms:5 * 60 * 1000,
+    price_source:price?.source || null,
+    price_fallback:price?.fallback === true,
+    pi_usd_price:piUsdPrice
   };
 }
 
-function isIpLiteral(hostname) {
-  if (!hostname) return true;
-  if (hostname.includes(":")) return true;
-  return /^\d{1,3}(?:\.\d{1,3}){3}$/.test(hostname);
-}
-
-function validateTargetUrl(raw) {
-  const text = String(raw ?? "").trim();
-  if (!text || text.length > MAX_URL_CHARS) return { ok:false, code:"SPONSOR_URL_INVALID" };
-  let url;
-  try { url = new URL(text); }
-  catch (_) { return { ok:false, code:"SPONSOR_URL_INVALID" }; }
-  if (url.protocol !== "https:") return { ok:false, code:"SPONSOR_URL_HTTPS_REQUIRED" };
-  if (url.username || url.password) return { ok:false, code:"SPONSOR_URL_CREDENTIALS_NOT_ALLOWED" };
-  if (url.port && url.port !== "443") return { ok:false, code:"SPONSOR_URL_PORT_NOT_ALLOWED" };
-  const host = url.hostname.toLowerCase();
-  if (!host || host === "localhost" || host.endsWith(".local") || host.endsWith(".internal") || isIpLiteral(host)) {
-    return { ok:false, code:"SPONSOR_URL_HOST_NOT_ALLOWED" };
-  }
-  const searchable = `${host}${url.pathname}${url.search}`.toLowerCase();
-  if (BLOCKED_URL_TERMS.some(term => searchable.includes(term))) return { ok:false, code:"SPONSOR_URL_CONTENT_NOT_ALLOWED" };
-  url.hash = "";
-  return { ok:true, url:url.href };
+async function piApi(env, path, options = {}) {
+  const apiKey = safeText(env.PI_API_KEY, 300);
+  if (!apiKey) throw new Error("PI_API_KEY_NOT_CONFIGURED");
+  const response = await fetch(`https://api.minepi.com/v2${path}`, {
+    method:options.method || "GET",
+    headers:{ "Authorization":`Key ${apiKey}`, ...(options.body ? { "Content-Type":"application/json" } : {}) },
+    body:options.body ? JSON.stringify(options.body) : undefined
+  });
+  const data = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(data?.error || data?.message || `PI_HTTP_${response.status}`);
+  return data;
 }
 
 function matchesImageSignature(bytes, contentType) {
@@ -127,7 +136,6 @@ function publicSponsor(row, origin) {
     user_id: row.user_id,
     user_name: row.user_name || null,
     name: row.name || null,
-    target_url: row.target_url,
     title: row.title || "",
     created_at: Number(row.created_at || 0),
     views: Number(row.views || 0),
@@ -176,21 +184,18 @@ async function listSponsors(request, env, helpers, url) {
   }, 200, request, helpers.corsHeaders);
 }
 
-async function uploadSponsor(request, env, helpers, url) {
-  if (request.method !== "POST" || url.pathname !== "/sponsors") return null;
+async function createSponsorPayment(request, env, helpers, url) {
+  if (request.method !== "POST" || url.pathname !== "/sponsors/pi-create") return null;
   const user = await helpers.requireUser(request, env);
   if (!user) return new Response("Unauthorized", { status:401, headers:helpers.corsHeaders(request) });
 
-  const account = await env.DB.prepare(`SELECT COALESCE(eggs,0) AS eggs FROM users WHERE id=? LIMIT 1`).bind(user.id).first();
+  const account = await env.DB.prepare(`SELECT id FROM users WHERE id=? LIMIT 1`).bind(user.id).first();
   if (!account) {
     return json({ ok:false, code:"SPONSOR_ACCOUNT_NOT_FOUND" }, 404, request, helpers.corsHeaders);
   }
 
   if (!env.GAME_PHOTOS || typeof env.GAME_PHOTOS.put !== "function") return json({ ok:false, code:"SPONSOR_STORAGE_NOT_CONFIGURED" }, 503, request, helpers.corsHeaders);
 
-  const target = validateTargetUrl(url.searchParams.get("url"));
-  if (!target.ok) return json({ ok:false, code:target.code }, 400, request, helpers.corsHeaders);
-  const title = safeText(url.searchParams.get("title"), MAX_TITLE_CHARS);
   const contentType = String(request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
   const ext = SPONSOR_CONTENT_TYPES.get(contentType);
   if (!ext) return json({ ok:false, code:"SPONSOR_IMAGE_TYPE_NOT_ALLOWED" }, 415, request, helpers.corsHeaders);
@@ -209,50 +214,106 @@ async function uploadSponsor(request, env, helpers, url) {
   }
 
   const sponsorId = crypto.randomUUID();
+  const internalId = crypto.randomUUID();
   const key = `sponsors/${sponsorId}.${ext}`;
   const now = Date.now();
-  const status = String(env?.ENV || "").toLowerCase() === "dev" ? "APPROVED" : "PENDING";
-  const approvedAt = status === "APPROVED" ? now : null;
 
   await env.GAME_PHOTOS.put(key, bytes, {
     httpMetadata:{ contentType, cacheControl:"public, max-age=31536000, immutable" },
-    customMetadata:{ owner_user_id:String(user.id), sponsor_id:sponsorId, target_host:new URL(target.url).hostname, created_at:String(now) }
+    customMetadata:{ owner_user_id:String(user.id), sponsor_id:sponsorId, payment_intent_id:internalId, created_at:String(now) }
   });
-
-  const debit = await env.DB.prepare(`UPDATE users SET eggs=eggs-? WHERE id=? AND eggs>=?`).bind(quote.coin_cost, user.id, quote.coin_cost).run();
-  if (Number(debit?.meta?.changes || 0) !== 1) {
-    try { await env.GAME_PHOTOS.delete(key); } catch (_) {}
-    const current = await env.DB.prepare(`SELECT COALESCE(eggs,0) AS eggs FROM users WHERE id=?`).bind(user.id).first();
-    return json({ ok:false, code:"SPONSOR_NOT_ENOUGH_FLAPPYCOIN", required:quote.coin_cost, eggs:Number(current?.eggs || 0) }, 409, request, helpers.corsHeaders);
-  }
 
   try {
     await env.DB.prepare(`
-      INSERT INTO user_sponsors (
-        sponsor_id,user_id,storage_key,content_type,target_url,title,usd_cents,coin_cost,coins_per_usd,
-        moderation_status,moderation_reason,created_at,approved_at,views,clicks
-      ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,0,0)
-    `).bind(
-      sponsorId,user.id,key,contentType,target.url,title,quote.usd_cents,quote.coin_cost,quote.coins_per_usd,
-      status,status === "APPROVED" ? "DEV_AUTO_APPROVED" : "PENDING_REVIEW",now,approvedAt
-    ).run();
+      INSERT INTO sponsor_payment_intents
+      (id,user_id,sponsor_id,storage_key,content_type,expected_pi,pi_usd_price,status,expires_at,created_at,updated_at)
+      VALUES (?,?,?,?,?,?,?,'CREATED',?,?,?)
+    `).bind(internalId,user.id,sponsorId,key,contentType,quote.amount,quote.pi_usd_price,now + PAYMENT_INTENT_TTL_MS,now,now).run();
   } catch (error) {
-    try { await env.DB.prepare(`UPDATE users SET eggs=eggs+? WHERE id=?`).bind(quote.coin_cost, user.id).run(); } catch (_) {}
     try { await env.GAME_PHOTOS.delete(key); } catch (_) {}
-    console.error("[SPONSOR INSERT]", error);
-    return json({ ok:false, code:"SPONSOR_CREATE_FAILED" }, 500, request, helpers.corsHeaders);
+    console.error("[SPONSOR PAYMENT INTENT]", error);
+    return json({ ok:false, code:"SPONSOR_PAYMENT_INTENT_FAILED" }, 500, request, helpers.corsHeaders);
   }
 
-  const updated = await env.DB.prepare(`SELECT COALESCE(eggs,0) AS eggs FROM users WHERE id=?`).bind(user.id).first();
   return json({
     ok:true,
+    internal_id:internalId,
     sponsor_id:sponsorId,
-    moderation_status:status,
-    remaining_eggs:Number(updated?.eggs || 0),
-    quote,
-    target_url:target.url,
-    image_url:`${url.origin}/sponsors/image/${sponsorId}.${ext}`
+    amount:quote.amount,
+    currency:"PI",
+    memo:"FlappyPi sponsor promotion",
+    metadata:{ type:"SPONSOR_PROMOTION", product_code:"FLAPPYPI_SPONSOR", internal_id:internalId, sponsor_id:sponsorId, user_id:user.id }
   }, 201, request, helpers.corsHeaders);
+}
+
+async function processSponsorPayment(request, env, helpers, url) {
+  if (request.method !== "POST" || !["/sponsors/pi-approve","/sponsors/pi-complete"].includes(url.pathname)) return null;
+  const user = await helpers.requireUser(request, env);
+  if (!user) return new Response("Unauthorized", { status:401, headers:helpers.corsHeaders(request) });
+  await ensureSchema(env);
+
+  let body = {};
+  try { body = await request.json(); } catch (_) { return json({ ok:false, code:"INVALID_JSON" }, 400, request, helpers.corsHeaders); }
+  const internalId = safeText(body?.internal_id, 80);
+  const paymentId = safeText(body?.payment_id, 140);
+  const txid = safeText(body?.txid, 160);
+  const intent = await env.DB.prepare(`SELECT * FROM sponsor_payment_intents WHERE id=? AND user_id=? LIMIT 1`).bind(internalId,user.id).first();
+  if (!intent || !paymentId) return json({ ok:false, code:"PAYMENT_INTENT_NOT_FOUND" }, 404, request, helpers.corsHeaders);
+  if (intent.status === "COMPLETED") {
+    const sponsor = await env.DB.prepare(`SELECT moderation_status FROM user_sponsors WHERE sponsor_id=? LIMIT 1`).bind(intent.sponsor_id).first();
+    return json({ ok:true, completed:true, sponsor_id:intent.sponsor_id, moderation_status:sponsor?.moderation_status || "PENDING" }, 200, request, helpers.corsHeaders);
+  }
+  if (Date.now() > Number(intent.expires_at || 0) && intent.status !== "APPROVED") return json({ ok:false, code:"PAYMENT_INTENT_EXPIRED" }, 409, request, helpers.corsHeaders);
+
+  const payment = await piApi(env, `/payments/${encodeURIComponent(paymentId)}`);
+  const meta = payment?.metadata || {};
+  const amountOk = Math.abs(Number(payment?.amount || 0) - Number(intent.expected_pi || 0)) <= 0.0000002;
+  const metaOk = String(meta.internal_id || meta.internalId || "") === internalId && String(meta.sponsor_id || "") === String(intent.sponsor_id);
+  const ownerOk = !payment?.user_uid || String(payment.user_uid) === String(user.id);
+  if (!amountOk || !metaOk || !ownerOk) return json({ ok:false, code:"PI_PAYMENT_CONTEXT_MISMATCH" }, 409, request, helpers.corsHeaders);
+
+  if (url.pathname.endsWith("pi-approve")) {
+    await piApi(env, `/payments/${encodeURIComponent(paymentId)}/approve`, { method:"POST", body:{} });
+    await env.DB.prepare(`UPDATE sponsor_payment_intents SET status='APPROVED',payment_id=?,updated_at=? WHERE id=?`).bind(paymentId,Date.now(),internalId).run();
+    return json({ ok:true, approved:true }, 200, request, helpers.corsHeaders);
+  }
+
+  if (!txid) return json({ ok:false, code:"TXID_REQUIRED" }, 400, request, helpers.corsHeaders);
+  await piApi(env, `/payments/${encodeURIComponent(paymentId)}/complete`, { method:"POST", body:{txid} });
+  const verified = await piApi(env, `/payments/${encodeURIComponent(paymentId)}`);
+  const completed = verified?.status?.developer_completed === true;
+  const verifiedTxid = String(verified?.transaction?.txid || "");
+  if (!completed || (verifiedTxid && verifiedTxid !== txid)) return json({ ok:false, code:"PI_PAYMENT_NOT_COMPLETED" }, 409, request, helpers.corsHeaders);
+
+  const now = Date.now();
+  const status = String(env?.ENV || "").toLowerCase() === "dev" ? "APPROVED" : "PENDING";
+  const approvedAt = status === "APPROVED" ? now : null;
+  await env.DB.batch([
+    env.DB.prepare(`
+      INSERT OR IGNORE INTO user_sponsors
+      (sponsor_id,user_id,storage_key,content_type,target_url,title,usd_cents,coin_cost,coins_per_usd,moderation_status,moderation_reason,created_at,approved_at,views,clicks,paid_pi,payment_id,txid)
+      VALUES (?,?,?,?,'','',?,0,0,?,?,?,?,0,0,?,?,?)
+    `).bind(intent.sponsor_id,user.id,intent.storage_key,intent.content_type,SPONSOR_USD_CENTS,status,status === "APPROVED" ? "DEV_AUTO_APPROVED" : "PENDING_REVIEW",now,approvedAt,Number(intent.expected_pi || 0),paymentId,txid),
+    env.DB.prepare(`UPDATE sponsor_payment_intents SET status='COMPLETED',payment_id=?,txid=?,updated_at=? WHERE id=?`).bind(paymentId,txid,now,internalId)
+  ]);
+
+  return json({ ok:true, completed:true, sponsor_id:intent.sponsor_id, moderation_status:status, image_url:`${url.origin}/sponsors/image/${String(intent.storage_key).replace(/^sponsors\//,"")}` }, 200, request, helpers.corsHeaders);
+}
+
+async function cancelSponsorPayment(request, env, helpers, url) {
+  if (request.method !== "POST" || url.pathname !== "/sponsors/pi-cancel") return null;
+  const user = await helpers.requireUser(request, env);
+  if (!user) return new Response("Unauthorized", { status:401, headers:helpers.corsHeaders(request) });
+  await ensureSchema(env);
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+  const internalId = safeText(body?.internal_id, 80);
+  const intent = await env.DB.prepare(`SELECT storage_key,status FROM sponsor_payment_intents WHERE id=? AND user_id=? LIMIT 1`).bind(internalId,user.id).first();
+  if (!intent) return json({ ok:true, cancelled:false }, 200, request, helpers.corsHeaders);
+  if (intent.status === "COMPLETED") return json({ ok:false, code:"SPONSOR_ALREADY_PAID" }, 409, request, helpers.corsHeaders);
+  await env.DB.prepare(`UPDATE sponsor_payment_intents SET status='CANCELLED',updated_at=? WHERE id=? AND user_id=?`).bind(Date.now(),internalId,user.id).run();
+  try { await env.GAME_PHOTOS?.delete?.(intent.storage_key); } catch (_) {}
+  return json({ ok:true, cancelled:true }, 200, request, helpers.corsHeaders);
 }
 
 async function sponsorImage(request, env, helpers, url) {
@@ -277,9 +338,9 @@ async function trackSponsor(request, env, helpers, url) {
   const action = match[2].toLowerCase();
   const column = action === "click" ? "clicks" : "views";
   await env.DB.prepare(`UPDATE user_sponsors SET ${column}=${column}+1 WHERE sponsor_id=? AND moderation_status='APPROVED'`).bind(sponsorId).run();
-  const row = await env.DB.prepare(`SELECT target_url,views,clicks FROM user_sponsors WHERE sponsor_id=? AND moderation_status='APPROVED'`).bind(sponsorId).first();
+  const row = await env.DB.prepare(`SELECT views,clicks FROM user_sponsors WHERE sponsor_id=? AND moderation_status='APPROVED'`).bind(sponsorId).first();
   if (!row) return json({ ok:false, code:"SPONSOR_NOT_FOUND" }, 404, request, helpers.corsHeaders);
-  return json({ ok:true, target_url:row.target_url, views:Number(row.views || 0), clicks:Number(row.clicks || 0) }, 200, request, helpers.corsHeaders);
+  return json({ ok:true, views:Number(row.views || 0), clicks:Number(row.clicks || 0) }, 200, request, helpers.corsHeaders);
 }
 
 export async function routeSponsors(request, env, helpers = {}) {
@@ -290,11 +351,25 @@ export async function routeSponsors(request, env, helpers = {}) {
     let quote;
     try { quote = await sponsorQuote(env); }
     catch (_) { return json({ ok:false, code:"SPONSOR_QUOTE_UNAVAILABLE" }, 503, request, helpers.corsHeaders); }
-    return json({ ok:true, ...quote }, 200, request, helpers.corsHeaders);
+    return json({
+      ok:true,
+      amount:quote.amount,
+      currency:quote.currency,
+      quoted_at:quote.quoted_at,
+      refresh_after_ms:quote.refresh_after_ms,
+      price_source:quote.price_source,
+      price_fallback:quote.price_fallback
+    }, 200, request, helpers.corsHeaders);
+  }
+
+  if (request.method === "POST" && url.pathname === "/sponsors") {
+    return json({ ok:false, code:"PAYMENT_METHOD_DISABLED", payment_method:"PI" }, 410, request, helpers.corsHeaders);
   }
 
   return await listSponsors(request, env, helpers, url)
-    || await uploadSponsor(request, env, helpers, url)
+    || await createSponsorPayment(request, env, helpers, url)
+    || await processSponsorPayment(request, env, helpers, url)
+    || await cancelSponsorPayment(request, env, helpers, url)
     || await sponsorImage(request, env, helpers, url)
     || await trackSponsor(request, env, helpers, url)
     || null;
