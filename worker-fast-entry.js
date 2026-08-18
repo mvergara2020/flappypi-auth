@@ -2,7 +2,8 @@ import appWorker from "./worker-app.js";
 import { routeShopCatalog } from "./shop-catalog.worker.js";
 import { enforceThreeStarsResponse } from "./game-three-stars.worker.js";
 
-const ENTRY_VERSION = "2026-08-17-always-three-stars-v5";
+const ENTRY_VERSION = "2026-08-17-always-three-stars-v6";
+let threeStarSchemaPromise = null;
 
 function allowedOrigin(request) {
   const origin = request.headers.get("Origin") || "";
@@ -14,6 +15,27 @@ function allowedOrigin(request) {
     "https://qa.classic.flappypi.com",
     "https://classic.flappypi.com"
   ].includes(origin) ? origin : "";
+}
+
+function ensureThreeStarTable(env) {
+  if (threeStarSchemaPromise) return threeStarSchemaPromise;
+  threeStarSchemaPromise = env.DB.prepare(`
+    CREATE TABLE IF NOT EXISTS game_stage_star_rewards (
+      game_uid TEXT PRIMARY KEY,
+      user_id TEXT NOT NULL,
+      game_type TEXT NOT NULL,
+      level_id INTEGER NOT NULL,
+      stars INTEGER NOT NULL,
+      performance TEXT NOT NULL,
+      attempts INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      applied_at INTEGER
+    )
+  `).run().catch(error => {
+    threeStarSchemaPromise = null;
+    throw error;
+  });
+  return threeStarSchemaPromise;
 }
 
 function diagnosticJson(request, body, status = 200, extraHeaders = {}) {
@@ -132,6 +154,14 @@ export default {
       path,
       elapsed_ms: Date.now() - startedAt
     });
+
+    if (
+      request.method === "POST" &&
+      ["/game/stage/finish", "/game/stage-stars"].includes(path) &&
+      env?.DB
+    ) {
+      await ensureThreeStarTable(env);
+    }
 
     const rewardRequest = request.clone();
     let response = await appWorker.fetch(request, env, ctx);
