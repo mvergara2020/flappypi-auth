@@ -1,5 +1,5 @@
 name = "flappypi-auth"
-main = "worker.js"
+main = "worker-fast-entry.js"
 compatibility_date = "2024-01-01"
 
 [[d1_databases]]
@@ -7,9 +7,39 @@ binding = "DB"
 database_name = "flappypi"
 database_id = "6bcb42bd-529f-4af5-bd4d-882c4e91790b"
 
+[[queues.producers]]
+binding = "GAME_POINTS_QUEUE"
+queue = "flappypi-game-points"
+
+[[queues.producers]]
+binding = "TELEGRAM_PHOTO_QUEUE"
+queue = "flappypi-photo-telegram-mainnet"
+
+[[queues.consumers]]
+queue = "flappypi-game-points"
+max_batch_size = 100
+max_batch_timeout = 20
+max_retries = 10
+max_concurrency = 1
+dead_letter_queue = "flappypi-game-points-dlq"
+
+[[queues.consumers]]
+queue = "flappypi-photo-telegram-mainnet"
+max_batch_size = 5
+max_batch_timeout = 1
+max_retries = 10
+max_concurrency = 2
+dead_letter_queue = "flappypi-photo-telegram-mainnet-dlq"
+
+[[r2_buckets]]
+binding = "GAME_PHOTOS"
+bucket_name = "flappypi-game-photos"
+
 [vars]
 ENV = "dev"
-
+PHOTO_TELEGRAM_ENV = "mainnet"
+TELEGRAM_ENABLED = "true"
+TELEGRAM_LOCAL_ENABLED = "false"
 
 # ================================
 # ENVIRONMENT: QA
@@ -20,12 +50,41 @@ routes = [
   { pattern = "qa.auth.flappypi.com/*", zone_name = "flappypi.com" }
 ]
 
-# Variables públicas QA
 [env.qa.vars]
 ENV = "qa"
+PHOTO_TELEGRAM_ENV = "testnet"
+TELEGRAM_ENABLED = "true"
+TELEGRAM_LOCAL_ENABLED = "false"
 
-# Base de datos QA
 [[env.qa.d1_databases]]
 binding = "DB"
 database_name = "flappypi_qa"
 database_id = "efcadca4-7074-42ae-b1e2-8595073e5d55"
+
+[[env.qa.queues.producers]]
+binding = "GAME_POINTS_QUEUE"
+queue = "flappypi-game-points-qa"
+
+[[env.qa.queues.producers]]
+binding = "TELEGRAM_PHOTO_QUEUE"
+queue = "flappypi-photo-telegram-testnet"
+
+[[env.qa.queues.consumers]]
+queue = "flappypi-game-points-qa"
+max_batch_size = 100
+max_batch_timeout = 20
+max_retries = 10
+max_concurrency = 1
+dead_letter_queue = "flappypi-game-points-qa-dlq"
+
+[[env.qa.queues.consumers]]
+queue = "flappypi-photo-telegram-testnet"
+max_batch_size = 5
+max_batch_timeout = 1
+max_retries = 10
+max_concurrency = 2
+dead_letter_queue = "flappypi-photo-telegram-testnet-dlq"
+
+[[env.qa.r2_buckets]]
+binding = "GAME_PHOTOS"
+bucket_name = "flappypi-game-photos-qa"

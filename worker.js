@@ -4,6 +4,8 @@ import {
   RANK_LEVELS
 } from "./levels.js";
 import { routeDailyRewards } from "./daily-rewards.worker.js";
+import { routeGamePhoto } from "./game-photo.worker.js";
+import { consumeTelegramPhotoBatch, isTelegramPhotoBatch } from "./telegram-photo.worker.js";
 
 //const FRONTEND_ORIGIN = "http://localhost:3000";
 const FRONTEND_ORIGIN = "http://192.168.1.81:3000";
@@ -282,7 +284,7 @@ const BIRD_SHIELDS = {
 };
 //const FREE_EGG_COOLDOWN = 8 * 60 * 60 * 1000; // 8 horas
 const LEVEL_TARGET = 100; //total tubos
-const MAX_LEVEL_CAP = 50; //ACTUALIZAR PRODUCCION
+const MAX_LEVEL_CAP = 999;
 const MIN_BASE_SEC = 5;
 const MIN_SEC_PER_PIPE = 0.35;
 const MAX_SCORE_PER_SEC = 3;
@@ -327,21 +329,21 @@ const GAME_DEFINITIONS = Object.freeze({
   flappy_classic: makeGame({
     ...FLAPPY_PIPE_RULES,
     scoringVersion: "flappy-pipes-v1",
-    maxLevel: 50,
+    maxLevel: 999,
     specialLevels: [0, 99999],
     completionValidator: "flappy_pipes",
     levelProgression: true,
-    levelRewardEnabled: true
+    levelRewardEnabled: false
   }),
 
   webcam_flappy: makeGame({
     ...FLAPPY_PIPE_RULES,
     scoringVersion: "webcam-flappy-pipes-v1",
-    maxLevel: 50,
+    maxLevel: 999,
     specialLevels: [0, 99999],
     completionValidator: "flappy_pipes",
     levelProgression: true,
-    levelRewardEnabled: true
+    levelRewardEnabled: false
   }),
 
   flappypi_999: makeGame({
@@ -633,8 +635,21 @@ async function enqueueGameProgress({
     throw new Error("GAME_PROGRESS_EXPIRED");
   }
 
-  const cumulativePoints =
+  const boostMultiplier =
+    getActiveBoostMultiplierFromUser(user, now);
+
+  const baseCumulativePoints =
     cumulativeMetric * game.pointsPerUnit;
+
+  const baseDeltaPoints =
+    (cumulativeMetric - previousMetric) *
+    game.pointsPerUnit;
+
+  const deltaPoints =
+    baseDeltaPoints * boostMultiplier;
+
+  const cumulativePoints =
+    previousPoints + deltaPoints;
 
   const maxAllowedPoints =
     Math.floor(
@@ -642,7 +657,7 @@ async function enqueueGameProgress({
     ) +
     GAME_PROGRESS_TIME_GRACE_POINTS;
 
-  if (cumulativePoints > maxAllowedPoints) {
+  if (baseCumulativePoints > maxAllowedPoints) {
     throw new Error(
       "GAME_PROGRESS_TIME_ANOMALY"
     );
@@ -650,9 +665,6 @@ async function enqueueGameProgress({
 
   const deltaMetric =
     cumulativeMetric - previousMetric;
-
-  const deltaPoints =
-    cumulativePoints - previousPoints;
 
   /*
     No mandamos mensajes vacíos durante la partida.
@@ -671,13 +683,14 @@ async function enqueueGameProgress({
       cumulativePoints,
       deltaMetric: 0,
       deltaPoints: 0,
+      boostMultiplier,
       receiptToken
     };
   }
 
   const nextSeq = previousSeq + 1;
 
-  await env.GAME_POINTS_QUEUE.send({
+  const progressEvent = {
     event_id:
       `${gameUid}:${nextSeq}:${final ? 1 : 0}`,
 
@@ -699,6 +712,9 @@ async function enqueueGameProgress({
     cumulative_points:
       cumulativePoints,
 
+    boost_multiplier:
+      boostMultiplier,
+
     started_at:
       startedAt,
 
@@ -706,7 +722,41 @@ async function enqueueGameProgress({
       now,
 
     final: final === true
-  });
+  };
+
+  let queued = false;
+  let confirmed = false;
+
+  const queueAvailable =
+    !!env.GAME_POINTS_QUEUE &&
+    typeof env.GAME_POINTS_QUEUE.send === "function";
+
+  if (queueAvailable) {
+    try {
+      await env.GAME_POINTS_QUEUE.send(progressEvent);
+      queued = true;
+    } catch (error) {
+      console.warn("[GAME POINTS QUEUE SEND FAILED]", {
+        game_uid: gameUid,
+        game_type: game.id,
+        message: String(error?.message || error)
+      });
+    }
+  }
+
+  /*
+    El finish confirma en D1 antes de responder.
+    Si Queue no está disponible, los checkpoints también
+    usan D1 como fallback para no perder PTS.
+
+    consolidateGamePointsEvent() es idempotente por
+    game_uid + métrica acumulada, por lo que el mensaje
+    posterior de Queue no duplica puntos.
+  */
+  if (final === true || queued === false) {
+    await consolidateGamePointsEvent(env, progressEvent);
+    confirmed = true;
+  }
 
   /*
     El nuevo recibo se genera solamente después de que
@@ -725,13 +775,15 @@ async function enqueueGameProgress({
     });
 
   return {
-    queued: true,
+    queued,
+    confirmed,
     final: final === true,
     seq: nextSeq,
     cumulativeMetric,
     cumulativePoints,
     deltaMetric,
     deltaPoints,
+    boostMultiplier,
     receiptToken: nextReceiptToken
   };
 }
@@ -940,6 +992,14 @@ async function consolidateGamePointsEvent(
     event?.cumulative_metric
   );
 
+  const incomingPoints = Number(
+    event?.cumulative_points
+  );
+
+  const eventBoostMultiplier = Number(
+    event?.boost_multiplier || 1
+  );
+
   const startedAt = Number(
     event?.started_at
   );
@@ -961,8 +1021,12 @@ async function consolidateGamePointsEvent(
       game.scoringVersion ||
     !Number.isInteger(incomingSeq) ||
     !Number.isInteger(incomingMetric) ||
+    !Number.isInteger(incomingPoints) ||
     incomingSeq < 1 ||
     incomingMetric < 0 ||
+    incomingPoints < 0 ||
+    incomingPoints > incomingMetric * game.pointsPerUnit * 8 ||
+    ![1, 3, 5, 8].includes(eventBoostMultiplier) ||
     !Number.isFinite(startedAt)
   ) {
     throw new Error(
@@ -1021,8 +1085,16 @@ async function consolidateGamePointsEvent(
     incomingMetric
   );
 
-  const newPoints =
-    newMetric * game.pointsPerUnit;
+  /*
+    Points are signed into the server receipt before entering the Queue.
+    They may include different boost windows during the same run, so the
+    authoritative cumulative value cannot be reconstructed from the last
+    multiplier alone.
+  */
+  const newPoints = Math.max(
+    oldPoints,
+    incomingPoints
+  );
 
   const deltaMetric = Math.max(
     0,
@@ -1395,7 +1467,7 @@ const MAX_STEAL = 75;
 
 let DEV_PIPE_GAP = 1.04; //DEJAR EN 1 PARA PRODUCCIÓN ....
 
-const LEVEL_DEFINITION = {
+const FLAPPY_STAGE_TEMPLATES = {
   0:  { mode: "normal", label: "∞", isInfinity: true , pipes_target: 100},
   1:  { mode: "normal", estrecho: 0.84*DEV_PIPE_GAP , pipes_target: 25},
   2:  { mode: "normal", estrecho: 0.84*DEV_PIPE_GAP , pipes_target: 25},
@@ -1463,6 +1535,34 @@ const LEVEL_DEFINITION = {
     baby: true          // flag especial
   }
 };
+
+/* =========================================================
+   FLAPPY CLASSIC - 999 STAGES
+   STAGE N requires N real pipes / official PTS.
+   Mechanics reuse the original 50-stage templates cyclically.
+========================================================= */
+function buildFlappyClassicStages(maxStage = 999) {
+  const stages = {};
+
+  for (let stage = 1; stage <= maxStage; stage++) {
+    const templateStage = ((stage - 1) % 50) + 1;
+    const template = FLAPPY_STAGE_TEMPLATES[templateStage] || FLAPPY_STAGE_TEMPLATES[1];
+
+    stages[stage] = Object.freeze({
+      ...template,
+      pipes_target: stage,
+      stage_id: stage,
+      template_stage: templateStage
+    });
+  }
+
+  stages[0] = Object.freeze({ ...FLAPPY_STAGE_TEMPLATES[0] });
+  stages[99999] = Object.freeze({ ...FLAPPY_STAGE_TEMPLATES[99999] });
+
+  return Object.freeze(stages);
+}
+
+const LEVEL_DEFINITION = buildFlappyClassicStages(999);
 
 function getEffectivePiAmount(amount, env) {
   if (env.ENV === "dev" || env.ENV === "qa") {
@@ -1567,6 +1667,18 @@ function getActiveBoostRow(row) {
     expires_at: Number(row.boost_expires_at),
     source: row.boost_source || null
   };
+}
+
+function getActiveBoostMultiplierFromUser(user, now = Date.now()) {
+  const directMultiplier = Number(user?.boost_multiplier || 0);
+  const directExpiresAt = Number(user?.boost_expires_at || 0);
+  const nestedMultiplier = Number(user?.active_boost?.multiplier || 0);
+  const nestedExpiresAt = Number(user?.active_boost?.expires_at || 0);
+  const multiplier = directMultiplier || nestedMultiplier;
+  const expiresAt = directExpiresAt || nestedExpiresAt;
+
+  if (!Number.isFinite(expiresAt) || expiresAt <= now) return 1;
+  return [3, 5, 8].includes(multiplier) ? multiplier : 1;
 }
 
 function makeDuelPublicId() {
@@ -2050,7 +2162,7 @@ if (!Number.isInteger(realPipesPassed) || realPipesPassed < target) {
   const durationSec = calcDurationSec(payload.startedAt);
 
   // ✅ mínimo dinámico según target real del nivel
-  const minDurationSec = Math.max(MIN_BASE_SEC, target * MIN_SEC_PER_PIPE);
+  const minDurationSec = Math.max(Math.min(MIN_BASE_SEC, target), target * MIN_SEC_PER_PIPE);
 
   if (durationSec < minDurationSec) {
     return {
@@ -2240,7 +2352,9 @@ async function requireUser(request, env) {
   }
 
   const user = await env.DB.prepare(
-    "SELECT id, email, user_name, total_score, welcome_claimed FROM users WHERE id = ?"
+    `SELECT id, email, user_name, total_score, welcome_claimed,
+            boost_multiplier, boost_expires_at, boost_source
+     FROM users WHERE id = ?`
   )
     .bind(payload.sub)
     .first();
@@ -2314,6 +2428,16 @@ export default {
   
     if (dailyRewardResponse) {
       return dailyRewardResponse;
+    }
+
+    const gamePhotoResponse = await routeGamePhoto(
+      request,
+      env,
+      { requireUser, corsHeaders, normalizeGameId }
+    );
+
+    if (gamePhotoResponse) {
+      return gamePhotoResponse;
     }
     /* =========================
        HEALTH
@@ -3607,9 +3731,11 @@ if (
       progress.deltaPoints,
 
     sync_status:
-      progress.queued
-        ? "queued"
-        : "unchanged",
+      progress.confirmed
+        ? "confirmed"
+        : progress.queued
+          ? "queued"
+          : "unchanged",
 
     receiptToken:
       progress.receiptToken
@@ -4761,8 +4887,13 @@ if (game.id !== "legacy") {
       points_accepted:
         progress.deltaPoints,
 
+      boost_multiplier:
+        progress.boostMultiplier,
+
       sync_status:
-        progress.queued
+      progress.confirmed
+        ? "confirmed"
+        : progress.queued
           ? "queued"
           : "unchanged",
 
@@ -4996,9 +5127,11 @@ if (game.id !== "legacy") {
         game_type: game.id,
     
         points_sync_status:
-          progress.queued
-            ? "queued"
-            : "unchanged",
+      progress.confirmed
+        ? "confirmed"
+        : progress.queued
+          ? "queued"
+          : "unchanged",
     
         receiptToken:
           progress.receiptToken,
@@ -5130,10 +5263,15 @@ if (game.id !== "legacy") {
     points_accepted:
       progress.deltaPoints,
 
+    boost_multiplier:
+      progress.boostMultiplier,
+
     sync_status:
-      progress.queued
-        ? "queued"
-        : "unchanged",
+      progress.confirmed
+        ? "confirmed"
+        : progress.queued
+          ? "queued"
+          : "unchanged",
 
     receiptToken:
       progress.receiptToken,
@@ -7220,6 +7358,10 @@ if (game.id !== "legacy") {
 },
 
 async queue(batch, env) {
+  if (isTelegramPhotoBatch(batch)) {
+    await consumeTelegramPhotoBatch(batch, env);
+    return;
+  }
   await consumeGamePointsBatch(
     batch,
     env
