@@ -1,7 +1,8 @@
 import appWorker from "./worker-app.js";
 import { routeShopCatalog } from "./shop-catalog.worker.js";
+import { enforceThreeStarsResponse } from "./game-three-stars.worker.js";
 
-const ENTRY_VERSION = "2026-08-09-stable-fast-entry-v4";
+const ENTRY_VERSION = "2026-08-17-always-three-stars-v5";
 
 function allowedOrigin(request) {
   const origin = request.headers.get("Origin") || "";
@@ -124,9 +125,7 @@ export default {
     }
 
     const shopResponse = await routeShopCatalog(request, env, url);
-    if (shopResponse) {
-      return decorateShopResponse(shopResponse, startedAt, path);
-    }
+    if (shopResponse) return decorateShopResponse(shopResponse, startedAt, path);
 
     console.log("[WORKER DELEGATE]", {
       request_id: requestId,
@@ -134,7 +133,9 @@ export default {
       elapsed_ms: Date.now() - startedAt
     });
 
-    const response = await appWorker.fetch(request, env, ctx);
+    const rewardRequest = request.clone();
+    let response = await appWorker.fetch(request, env, ctx);
+    response = await enforceThreeStarsResponse(rewardRequest, response, env);
     return finalizeResponse(response, "app");
   },
 
