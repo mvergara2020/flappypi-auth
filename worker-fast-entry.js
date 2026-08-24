@@ -1,8 +1,9 @@
 import appWorker from "./worker-app.js";
 import { routeShopCatalog } from "./shop-catalog.worker.js";
 import { enforceThreeStarsResponse } from "./game-three-stars.worker.js";
+import { routeRetroGameTop } from "./retro-top.worker.js";
 
-const ENTRY_VERSION = "2026-08-17-always-three-stars-v6";
+const ENTRY_VERSION = "2026-08-24-retro-top-v7";
 let threeStarSchemaPromise = null;
 
 function allowedOrigin(request) {
@@ -145,6 +146,9 @@ export default {
         "X-FlappyPi-Response-Framing": "auto"
       });
     }
+
+    const retroTopResponse = await routeRetroGameTop(request, env, url);
+    if (retroTopResponse) return finalizeResponse(retroTopResponse, "retro-top");
 
     const shopResponse = await routeShopCatalog(request, env, url);
     if (shopResponse) return decorateShopResponse(shopResponse, startedAt, path);
