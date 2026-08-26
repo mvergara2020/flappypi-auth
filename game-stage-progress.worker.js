@@ -38,6 +38,7 @@ const GAME_ALIASES = Object.freeze({
   fusion: "fusion_999",
   "fusion-999": "fusion_999"
 });
+const RUN_POINT_GAMES = new Set(["snake_999", "jelly_fusion", "tetriz_999"]);
 
 let stageStatsSchemaPromise = null;
 let runStatsSchemaPromise = null;
@@ -253,7 +254,7 @@ function ensureRunStatsSchema(env) {
 }
 
 async function applyRunStats(env, userId, gameType, stage, nonce, rawScore, completed, boostMultiplier = 1, now = Date.now()) {
-  if (gameType !== "snake_999") {
+  if (!RUN_POINT_GAMES.has(gameType)) {
     return { enabled: false, applied: false, duplicate: false, points: 0 };
   }
 
@@ -632,7 +633,7 @@ export async function routeGameStageProgress(request, env, user) {
 
   const current = await currentProgress(env, user.id, gameType);
   if (url.pathname === "/game/stage/score") {
-    if (gameType !== "snake_999") {
+    if (!RUN_POINT_GAMES.has(gameType)) {
       return new Response(JSON.stringify({ ok: false, code: "RUN_SCORE_NOT_SUPPORTED" }), {
         status: 409,
         headers: { "Content-Type": "application/json; charset=utf-8", "Cache-Control": "no-store" }

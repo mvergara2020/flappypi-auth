@@ -388,6 +388,14 @@ function ensureSchema(env) {
       PRIMARY KEY (user_id, face_id)
     )`),
     env.DB.prepare(`CREATE INDEX IF NOT EXISTS idx_user_face_unlocks_user ON user_face_unlocks(user_id,created_at DESC)`),
+    env.DB.prepare(`CREATE TABLE IF NOT EXISTS fusion_hint_purchases (
+      user_id TEXT NOT NULL,
+      request_id TEXT NOT NULL UNIQUE,
+      target_id TEXT NOT NULL,
+      flappycoins_spent INTEGER NOT NULL,
+      created_at INTEGER NOT NULL,
+      PRIMARY KEY (user_id, request_id)
+    )`),
     env.DB.prepare(`CREATE TABLE IF NOT EXISTS collaborators (
       user_id TEXT PRIMARY KEY,
       code TEXT NOT NULL UNIQUE,
@@ -1287,6 +1295,35 @@ async function routeFaces(request, env, helpers, url, user) {
   return null;
 }
 
+async function routeFusionHints(request, env, helpers, url, user) {
+  const { corsHeaders } = helpers;
+  if (request.method !== "POST" || url.pathname !== "/game/fusion-999/hints/buy") return null;
+  await ensureSchema(env);
+  let body = {};
+  try { body = await request.json(); } catch (_) {}
+  const targetId = safeText(body?.target_id, 16).toLowerCase();
+  const requestId = safeText(body?.request_id, 96);
+  const price = 500;
+  if (!/^(?:s|e)\d{3}$/.test(targetId) || !requestId) return json({ ok: false, code: "INVALID_HINT_REQUEST" }, 400, request, corsHeaders);
+
+  const created = await env.DB.prepare(`INSERT OR IGNORE INTO fusion_hint_purchases (user_id,request_id,target_id,flappycoins_spent,created_at) VALUES (?,?,?,?,?)`).bind(user.id, requestId, targetId, 0, Date.now()).run();
+  if (!Number(created?.meta?.changes || 0)) {
+    const existing = await env.DB.prepare(`SELECT flappycoins_spent FROM fusion_hint_purchases WHERE user_id=? AND request_id=? LIMIT 1`).bind(user.id, requestId).first();
+    const wallet = await env.DB.prepare(`SELECT COALESCE(eggs,0) AS coins FROM users WHERE id=? LIMIT 1`).bind(user.id).first();
+    if (Number(existing?.flappycoins_spent || 0) === price) return json({ ok: true, already_purchased: true, flappycoins_spent: price, wallet_flappycoins: Number(wallet?.coins || 0) }, 200, request, corsHeaders);
+    return json({ ok: false, code: "HINT_PURCHASE_PENDING" }, 409, request, corsHeaders);
+  }
+
+  const debit = await env.DB.prepare(`UPDATE users SET eggs=COALESCE(eggs,0)-? WHERE id=? AND COALESCE(eggs,0)>=?`).bind(price, user.id, price).run();
+  const wallet = await env.DB.prepare(`SELECT COALESCE(eggs,0) AS coins FROM users WHERE id=? LIMIT 1`).bind(user.id).first();
+  if (!Number(debit?.meta?.changes || 0)) {
+    await env.DB.prepare(`DELETE FROM fusion_hint_purchases WHERE user_id=? AND request_id=? AND flappycoins_spent=0`).bind(user.id, requestId).run();
+    return json({ ok: false, code: "INSUFFICIENT_FLAPPYCOINS", required_flappycoins: price, available_flappycoins: Number(wallet?.coins || 0) }, 409, request, corsHeaders);
+  }
+  await env.DB.prepare(`UPDATE fusion_hint_purchases SET flappycoins_spent=? WHERE user_id=? AND request_id=? AND flappycoins_spent=0`).bind(price, user.id, requestId).run();
+  return json({ ok: true, already_purchased: false, flappycoins_spent: price, wallet_flappycoins: Number(wallet?.coins || 0) }, 200, request, corsHeaders);
+}
+
 async function routePhotos(request, env, helpers, url, user) {
   const { corsHeaders, normalizeGameId } = helpers;
   if (!url.pathname.startsWith("/game/photos") && !/^\/game\/photo\/[0-9a-f-]{36}\/(?:view|like)$/i.test(url.pathname)) return null;
@@ -1364,6 +1401,7 @@ export async function routePlatform(request, env, helpers = {}) {
     url.pathname.startsWith("/rank/rewards") ||
     url.pathname.startsWith("/collaborators") ||
     url.pathname.startsWith("/camera/faces/") ||
+    url.pathname === "/game/fusion-999/hints/buy" ||
     url.pathname === "/game/photos" ||
     /^\/game\/photo\/[0-9a-f-]{36}\/(?:view|like)$/i.test(url.pathname);
   if (!platformPath) return null;
@@ -1385,6 +1423,8 @@ export async function routePlatform(request, env, helpers = {}) {
     if (collaborators) return collaborators;
     const faces = await routeFaces(request, env, { corsHeaders }, url, user);
     if (faces) return faces;
+    const fusionHint = await routeFusionHints(request, env, { corsHeaders }, url, user);
+    if (fusionHint) return fusionHint;
   }
 
   return routePhotos(request, env, { corsHeaders, normalizeGameId }, url, user);

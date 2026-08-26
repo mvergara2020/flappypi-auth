@@ -331,7 +331,14 @@ async function validateFingerFinish(request, env, body) {
   }
 
   const maxUnlocked = await getMaxUnlocked(env, String(payload.sub), FINGER_GAME);
-  if (stage !== maxUnlocked) {
+  /*
+    El finish puede reintentarse después de que la primera petición ya avanzó
+    la etapa. El Worker base deduplica ese caso por game_uid; rechazarlo aquí
+    antes de delegar dejaba al cliente sin la respuesta final.
+  */
+  const isCurrentStage = stage === maxUnlocked;
+  const isCompletedStageRetry = stage === maxUnlocked - 1;
+  if (!isCurrentStage && !isCompletedStageRetry) {
     return {
       payload,
       rejection: json(request, {
@@ -358,7 +365,18 @@ async function validateFingerFinish(request, env, body) {
     };
   }
 
-  return { payload, rejection: null };
+  /* El nivel del JWT es la única fuente de verdad; el cuerpo puede quedar
+     desfasado si el cliente ya preparó visualmente la siguiente etapa. */
+  return {
+    payload,
+    rejection: null,
+    body: {
+      ...body,
+      game_type: FINGER_GAME,
+      mode: "levels",
+      level_id: stage
+    }
+  };
 }
 
 async function applyFingerProgress(env, payload) {
@@ -608,6 +626,13 @@ async function handleFetch(request, env, ctx) {
 
     const fingerValidation = await validateFingerFinish(request, env, requestBody);
     if (fingerValidation.rejection) return fingerValidation.rejection;
+
+    if (fingerValidation.body) {
+      workingRequest = new Request(workingRequest, {
+        body: JSON.stringify(fingerValidation.body),
+        headers: workingRequest.headers
+      });
+    }
 
     const response = await baseWorker.fetch(workingRequest, env, ctx);
     if (!fingerValidation.payload || !response.ok) return response;
