@@ -5,6 +5,14 @@ const MIN_BASE_SEC=5;
 const MIN_SEC_PER_PIPE=.35;
 const MAX_PIPES_PER_SEC=3;
 const TIME_GRACE_PIPES=3;
+const ALLOWED_ORIGINS=new Set([
+  "http://localhost:3000",
+  "http://127.0.0.1:3000",
+  "http://192.168.1.81:3000",
+  "https://192.168.1.81:3000",
+  "https://qa.classic.flappypi.com",
+  "https://classic.flappypi.com"
+]);
 
 function normalizeGameType(value){
   return String(value||"").trim().toLowerCase().replace(/-/g,"_").replace(/[^a-z0-9_]/g,"");
@@ -27,9 +35,7 @@ function decodeBase64Url(value){
 function encodeBase64Url(value){
   const bytes=value instanceof Uint8Array?value:new TextEncoder().encode(String(value));
   let binary="";
-  for(let offset=0;offset<bytes.length;offset+=8192){
-    binary+=String.fromCharCode(...bytes.subarray(offset,offset+8192));
-  }
+  for(let offset=0;offset<bytes.length;offset+=8192)binary+=String.fromCharCode(...bytes.subarray(offset,offset+8192));
   return btoa(binary).replace(/\+/g,"-").replace(/\//g,"_").replace(/=+$/g,"");
 }
 
@@ -66,8 +72,12 @@ function responseWithJson(response,data){
 
 function jsonError(request,body,status){
   const headers=new Headers({"Content-Type":"application/json; charset=utf-8","Cache-Control":"no-store","X-FlappyPi-Retro-Contract":RETRO_PLAN_VERSION});
-  const origin=request.headers.get("Origin");
-  if(origin){headers.set("Access-Control-Allow-Origin",origin);headers.set("Access-Control-Allow-Credentials","true");headers.set("Vary","Origin")}
+  const origin=request.headers.get("Origin")||"";
+  if(ALLOWED_ORIGINS.has(origin)){
+    headers.set("Access-Control-Allow-Origin",origin);
+    headers.set("Access-Control-Allow-Credentials","true");
+    headers.set("Vary","Origin");
+  }
   return new Response(JSON.stringify({ok:false,success:false,...body}),{status,headers});
 }
 
@@ -139,26 +149,19 @@ async function readJson(request){
 
 export async function prepareRetroContractRequest(request,env){
   const url=new URL(request.url);
-  if(request.method!=="POST"||!["/game/start","/game/finish"].includes(url.pathname)){
-    return {request,kind:null,body:null};
-  }
+  if(request.method!=="POST"||!["/game/start","/game/finish"].includes(url.pathname))return {request,kind:null,body:null};
 
   const body=await readJson(request);
   if(!body)return {request,kind:null,body:null};
   const requestedGame=normalizeGameType(body.game_type);
 
-  if(url.pathname==="/game/start"){
-    return requestedGame===RETRO_GAME_TYPE?{request,kind:"start",body}:{request,kind:null,body};
-  }
+  if(url.pathname==="/game/start")return requestedGame===RETRO_GAME_TYPE?{request,kind:"start",body}:{request,kind:null,body};
 
   let payload;
-  try{payload=await verifyJWT(body.gameToken,env.JWT_SECRET)}
-  catch(_){return {request,kind:null,body}}
+  try{payload=await verifyJWT(body.gameToken,env.JWT_SECRET)}catch(_){return {request,kind:null,body}}
 
   const gameType=normalizeGameType(payload?.game_type||requestedGame);
-  if(gameType!==RETRO_GAME_TYPE||String(payload?.mode||body.mode||"")!=="levels"){
-    return {request,kind:null,body};
-  }
+  if(gameType!==RETRO_GAME_TYPE||String(payload?.mode||body.mode||"")!=="levels")return {request,kind:null,body};
 
   const stage=Number(payload.level_id||0);
   if(!Number.isInteger(stage)||stage<1||stage>MAX_STAGE){
@@ -167,8 +170,14 @@ export async function prepareRetroContractRequest(request,env){
 
   const target=retroTargetForStage(stage);
   const completeGame=body.complete_game===true;
-  if(!completeGame){
-    return {request,kind:"finish",body,payload,target,completeGame:false};
+  if(!completeGame)return {request,kind:"finish",body,payload,target,completeGame:false};
+
+  const signedTarget=Number(payload.stage_target);
+  const signedPlanVersion=String(payload.level_plan_version||"");
+  if(signedTarget!==target||signedPlanVersion!==RETRO_PLAN_VERSION){
+    return {request,kind:"finish",body,payload,target,completeGame:true,rejection:jsonError(request,{
+      code:"RETRO_STAGE_CONTRACT_INVALID",message:"Retro stage contract is not valid",stage,target,signed_target:signedTarget||null,level_plan_version:signedPlanVersion||null
+    },409)};
   }
 
   const pipesPassed=Number(body.pipes_passed??body.difficulty_pipes_passed??body.score??0);
