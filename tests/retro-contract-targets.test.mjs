@@ -3,7 +3,7 @@ import {readFile} from "node:fs/promises";
 
 const source=await readFile(new URL("../retro-contract.worker.js",import.meta.url),"utf8");
 const executable=source
-  .replace(/\bexport\s+(?=(?:const|let|var|class|function)\b)/g,"")
+  .replace(/\bexport\s+(?=(?:const|let|var|class|function|async\s+function)\b)/g,"")
   .replace(/\bexport\s*\{[^}]*\};?/g,"");
 assert.doesNotThrow(()=>new Function(executable),"retro-contract.worker.js must parse");
 const contract=new Function(`${executable}\nreturn {retroTargetForStage,RETRO_GAME_TYPE,RETRO_PLAN_VERSION};`)();
