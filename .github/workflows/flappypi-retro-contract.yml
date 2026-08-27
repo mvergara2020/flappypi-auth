@@ -1,0 +1,33 @@
+name: FlappyPi Retro Auth Contract
+
+on:
+  push:
+    paths:
+      - "retro-contract.worker.js"
+      - "worker-fast-entry.js"
+      - "tests/retro-contract-targets.test.mjs"
+      - ".github/workflows/flappypi-retro-contract.yml"
+  pull_request:
+    paths:
+      - "retro-contract.worker.js"
+      - "worker-fast-entry.js"
+      - "tests/retro-contract-targets.test.mjs"
+
+permissions:
+  contents: read
+
+jobs:
+  retro-auth-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Validate signed Retro target contract
+        run: node tests/retro-contract-targets.test.mjs
+      - name: Parse active Worker entry
+        run: node --check worker-fast-entry.js
+      - name: Parse Retro contract Worker
+        run: node --check retro-contract.worker.js
