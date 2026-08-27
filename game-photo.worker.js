@@ -11,7 +11,9 @@ const PHOTO_CONTENT_TYPES = new Map([
   ["image/webp", "webp"]
 ]);
 
-const STAGE_STAR_GAMES = new Set(["flappy_classic", "webcam_flappy"]);
+// Retro usa el mismo flujo de niveles que Classic y debe poder reclamar
+// las estrellas al completar una etapa.
+const STAGE_STAR_GAMES = new Set(["flappy_classic", "flappy_retro", "webcam_flappy"]);
 let stageStarSchemaPromise = null;
 let photoSocialSchemaPromise = null;
 

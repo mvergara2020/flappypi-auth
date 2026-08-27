@@ -5,7 +5,7 @@ const GAME_STAGE_CONFIG = Object.freeze({
   flappy_classic: Object.freeze({ maxStage: 999, coreManaged: true }),
   webcam_flappy: Object.freeze({ maxStage: 999, coreManaged: true }),
   finger_trace: Object.freeze({ maxStage: 999, coreManaged: true }),
-  fruits_memory: Object.freeze({ maxStage: 9, coreManaged: false }),
+  fruits_memory: Object.freeze({ maxStage: 100, coreManaged: false }),
   snake_999: Object.freeze({ maxStage: 999, coreManaged: false }),
   jelly_fusion: Object.freeze({ maxStage: 9999, coreManaged: false }),
   tetriz_999: Object.freeze({ maxStage: 999, coreManaged: false }),
@@ -58,7 +58,7 @@ function activeBoostMultiplier(user, now = Date.now()) {
 }
 
 function fruitsMemoryStagePoints(stage) {
-  const level = Math.max(1, Math.min(9, Number(stage) || 1));
+  const level = Math.max(1, Math.min(100, Number(stage) || 1));
   const base = Math.min(10, level + 1);
   let rows = base;
   let cols = base;
