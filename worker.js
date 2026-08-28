@@ -339,7 +339,7 @@ const GAME_DEFINITIONS = Object.freeze({
   flappy_retro: makeGame({
     ...FLAPPY_PIPE_RULES,
     scoringVersion: "flappy-retro-pipes-v1",
-    maxLevel: 999,
+    maxLevel: 1000,
     specialLevels: [0, 99999],
     completionValidator: "flappy_pipes",
     levelProgression: true,

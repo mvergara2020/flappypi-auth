@@ -1,6 +1,6 @@
 const RETRO_GAME_TYPE="flappy_retro";
-const RETRO_PLAN_VERSION="retro-15-100-v1";
-const MAX_STAGE=999;
+const RETRO_PLAN_VERSION="retro-15-100-v2";
+const MAX_STAGE=1000;
 const MIN_BASE_SEC=5;
 const MIN_SEC_PER_PIPE=.35;
 const MAX_PIPES_PER_SEC=3;

@@ -10,7 +10,11 @@ const GAME_STAGE_CONFIG = Object.freeze({
   jelly_fusion: Object.freeze({ maxStage: 9999, coreManaged: false }),
   tetriz_999: Object.freeze({ maxStage: 999, coreManaged: false }),
   flappypi_999: Object.freeze({ maxStage: 999, coreManaged: false }),
-  fusion_999: Object.freeze({ maxStage: 999, coreManaged: false })
+  fusion_999: Object.freeze({ maxStage: 999, coreManaged: false }),
+  pollito_lanzador_3d: Object.freeze({ maxStage: 1, coreManaged: false }),
+  sumas_arcade: Object.freeze({ maxStage: 1, coreManaged: false }),
+  finger_shape_precision: Object.freeze({ maxStage: 1, coreManaged: false }),
+  slice_percent: Object.freeze({ maxStage: 1, coreManaged: false })
 });
 
 const GAME_ALIASES = Object.freeze({
@@ -36,9 +40,17 @@ const GAME_ALIASES = Object.freeze({
   "flappypi-999": "flappypi_999",
   "flappypi-999-worlds": "flappypi_999",
   fusion: "fusion_999",
-  "fusion-999": "fusion_999"
+  "fusion-999": "fusion_999",
+  "mini-pollito": "pollito_lanzador_3d",
+  "pollito-lanzador-3d": "pollito_lanzador_3d",
+  "mini-sumas": "sumas_arcade",
+  "sumas-arcade": "sumas_arcade",
+  "mini-finger": "finger_shape_precision",
+  "finger-shape-precision": "finger_shape_precision",
+  "mini-slice": "slice_percent",
+  "slice-percent": "slice_percent"
 });
-const RUN_POINT_GAMES = new Set(["snake_999", "jelly_fusion", "tetriz_999"]);
+const RUN_POINT_GAMES = new Set(["snake_999", "jelly_fusion", "tetriz_999", "pollito_lanzador_3d", "sumas_arcade", "finger_shape_precision", "slice_percent"]);
 
 let stageStatsSchemaPromise = null;
 let runStatsSchemaPromise = null;

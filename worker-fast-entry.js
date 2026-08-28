@@ -4,7 +4,7 @@ import {enforceThreeStarsResponse} from "./game-three-stars.worker.js";
 import {routeRetroGameTop} from "./retro-top.worker.js";
 import {finalizeRetroContractResponse,prepareRetroContractRequest} from "./retro-contract.worker.js";
 
-const ENTRY_VERSION="2026-08-27-retro-contract-v8";
+const ENTRY_VERSION="2026-08-27-retro-contract-v9";
 let threeStarSchemaPromise=null;
 
 function allowedOrigin(request){

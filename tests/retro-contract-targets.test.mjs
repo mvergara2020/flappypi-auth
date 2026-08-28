@@ -9,14 +9,14 @@ assert.doesNotThrow(()=>new Function(executable),"retro-contract.worker.js must 
 const contract=new Function(`${executable}\nreturn {retroTargetForStage,RETRO_GAME_TYPE,RETRO_PLAN_VERSION};`)();
 
 assert.equal(contract.RETRO_GAME_TYPE,"flappy_retro");
-assert.equal(contract.RETRO_PLAN_VERSION,"retro-15-100-v1");
+assert.equal(contract.RETRO_PLAN_VERSION,"retro-15-100-v2");
 assert.equal(contract.retroTargetForStage(1),15);
 assert.equal(contract.retroTargetForStage(3),15);
 assert.equal(contract.retroTargetForStage(4),15);
 assert.equal(contract.retroTargetForStage(100),23);
-assert.equal(contract.retroTargetForStage(500),58);
-assert.equal(contract.retroTargetForStage(999),100);
-for(let stage=1;stage<=999;stage++){
+assert.equal(contract.retroTargetForStage(500),57);
+assert.equal(contract.retroTargetForStage(1000),100);
+for(let stage=1;stage<=1000;stage++){
   const target=contract.retroTargetForStage(stage);
   assert.ok(Number.isInteger(target));
   assert.ok(target>=15&&target<=100);
