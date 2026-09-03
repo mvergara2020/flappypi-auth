@@ -1,5 +1,5 @@
 const DECORATED_PATHS = new Set(["/game/stage/finish", "/game/stage/score", "/game/stage-stars"]);
-const POINT_GAMES = new Set(["tetriz_999", "flappypi_999", "fusion_999", "pollito_lanzador_3d", "sumas_arcade", "finger_shape_precision", "slice_percent"]);
+const POINT_GAMES = new Set(["tetriz_999", "flappypi_999", "fusion_999", "pollito_lanzador_2d_retro", "pollito_lanzador_3d", "sumas_arcade", "finger_shape_precision", "slice_percent", "ninja_chicken_999"]);
 const ALLOWED_BOOSTS = new Set([1, 3, 5, 8]);
 const CURRENT_SEASON_ID = "S5";
 let starSchemaPromise = null;

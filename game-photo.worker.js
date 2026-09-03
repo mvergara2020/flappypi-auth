@@ -2,8 +2,18 @@ import { registerGamePhoto, routePlatform } from "./platform.worker.js";
 import { routeSponsors } from "./sponsor.worker.js";
 import { routePhotoView } from "./photo-views.worker.js";
 import { enqueueTelegramPhoto } from "./telegram-photo.worker.js";
+import {
+  buildGameImageKey,
+  deleteStoredImage,
+  getStoredImage,
+  imageContentTypeForExtension,
+  imageExtensionForContentType,
+  imageMatchesSignature,
+  MAX_IMAGE_BYTES,
+  putStoredImage
+} from "./media-storage.worker.js";
 
-const MAX_PHOTO_BYTES = 5 * 1024 * 1024;
+const MAX_PHOTO_BYTES = MAX_IMAGE_BYTES;
 const MAX_PHOTO_COMMENT_CHARS = 100;
 const PHOTO_CONTENT_TYPES = new Map([
   ["image/jpeg", "jpg"],
@@ -105,7 +115,7 @@ async function routePhotoFeed(request, env, helpers, url) {
   const where = filters.length ? ` WHERE ${filters.join(" AND ")}` : "";
 
   const select = `
-    SELECT p.photo_id,p.owner_user_id,p.game_type,p.stage,p.total_points,p.storage_key,p.comment,p.created_at,p.views,p.likes,
+    SELECT p.photo_id,p.owner_user_id,p.game_type,p.stage,p.total_points,p.storage_key,p.content_type,p.comment,p.created_at,p.views,p.likes,
            u.user_name,u.name,
            EXISTS(SELECT 1 FROM game_photo_likes l WHERE l.photo_id=p.photo_id AND l.user_id=?) AS liked
     FROM game_photos p
@@ -146,8 +156,7 @@ async function routePhotoFeed(request, env, helpers, url) {
       user_name: row.user_name,
       name: row.name,
       comment: safeComment(row.comment),
-      storage_key: row.storage_key,
-      url: `${url.origin}/game/photo/${String(row.storage_key).replace(/^shared\//, "")}`
+      url: `${url.origin}/game/photo/${row.photo_id}.${imageExtensionForContentType(row.content_type) || "jpg"}`
     }))
   }, 200, request, corsHeaders);
 }
@@ -329,7 +338,7 @@ export async function routeGamePhoto(request, env, helpers = {}) {
   if (request.method === "POST" && url.pathname === "/game/photo") {
     const user = await requireUser(request, env);
     if (!user) return new Response("Unauthorized", { status: 401, headers: corsHeaders(request) });
-    if (!env.GAME_PHOTOS || typeof env.GAME_PHOTOS.put !== "function") return json({ ok: false, code: "PHOTO_STORAGE_NOT_CONFIGURED" }, 503, request, corsHeaders);
+    if (!env.IMAGES_BUCKET || typeof env.IMAGES_BUCKET.put !== "function") return json({ ok: false, code: "PHOTO_STORAGE_NOT_CONFIGURED" }, 503, request, corsHeaders);
 
     const rawComment = String(url.searchParams.get("comment") || "").trim();
     if (commentChars(rawComment).length > MAX_PHOTO_COMMENT_CHARS) {
@@ -338,26 +347,29 @@ export async function routeGamePhoto(request, env, helpers = {}) {
     const comment = safeComment(rawComment);
 
     const contentType = String(request.headers.get("Content-Type") || "").split(";")[0].trim().toLowerCase();
-    const ext = PHOTO_CONTENT_TYPES.get(contentType);
+    const ext = imageExtensionForContentType(contentType) || PHOTO_CONTENT_TYPES.get(contentType);
     if (!ext) return json({ ok: false, code: "PHOTO_TYPE_NOT_ALLOWED" }, 415, request, corsHeaders);
 
     const declaredLength = Number(request.headers.get("Content-Length") || 0);
     if (declaredLength > MAX_PHOTO_BYTES) return json({ ok: false, code: "PHOTO_TOO_LARGE", max_bytes: MAX_PHOTO_BYTES }, 413, request, corsHeaders);
     const bytes = await request.arrayBuffer();
     if (!bytes.byteLength || bytes.byteLength > MAX_PHOTO_BYTES) return json({ ok: false, code: "PHOTO_TOO_LARGE", max_bytes: MAX_PHOTO_BYTES }, 413, request, corsHeaders);
+    if (!imageMatchesSignature(bytes, contentType)) return json({ ok: false, code: "PHOTO_SIGNATURE_INVALID" }, 415, request, corsHeaders);
 
     const photoId = crypto.randomUUID();
     const fileName = `${photoId}.${ext}`;
-    const key = `shared/${fileName}`;
     const gameType = normalizeGameId(url.searchParams.get("game_type") || "game") || "game";
     const stage = safeStage(url.searchParams.get("stage"));
     const totalPoints = safePoints(url.searchParams.get("total_points"));
     const createdAt = Date.now();
+    const key = buildGameImageKey(env, { gameType, userId: user.id, photoId, extension: ext, createdAt });
 
-    await env.GAME_PHOTOS.put(key, bytes, {
-      httpMetadata: { contentType, cacheControl: "public, max-age=31536000, immutable" },
-      customMetadata: { owner_user_id: safeText(user.id,120), game_type: safeText(gameType,64), stage: String(stage), total_points: String(totalPoints), created_at: String(createdAt) }
-    });
+    try {
+      await putStoredImage(env, key, bytes, contentType, { owner_user_id: safeText(user.id,120), game_type: safeText(gameType,64), stage: String(stage), total_points: String(totalPoints), created_at: String(createdAt) });
+    } catch (error) {
+      console.error("[GAME PHOTO STORAGE ERROR]", { code: String(error?.message || error) });
+      return json({ ok: false, code: "PHOTO_STORAGE_NOT_CONFIGURED" }, 503, request, corsHeaders);
+    }
 
     try {
       await ensurePhotoSocialSchema(env);
@@ -373,7 +385,7 @@ export async function routeGamePhoto(request, env, helpers = {}) {
       });
       await env.DB.prepare(`UPDATE game_photos SET comment=? WHERE photo_id=?`).bind(comment, photoId).run();
     } catch (error) {
-      try { await env.GAME_PHOTOS.delete(key); } catch (_) {}
+      try { await deleteStoredImage(env, key); } catch (cleanupError) { console.error("[GAME PHOTO CLEANUP ERROR]", { code: String(cleanupError?.message || cleanupError) }); }
       console.error("[GAME PHOTO INDEX ERROR]", error);
       return json({ ok: false, code: "PHOTO_INDEX_FAILED" }, 500, request, corsHeaders);
     }
@@ -398,7 +410,6 @@ export async function routeGamePhoto(request, env, helpers = {}) {
       photo_id: photoId,
       content_type: contentType,
       size: bytes.byteLength,
-      storage_key: key,
       comment,
       url: `${url.origin}/game/photo/${fileName}`,
       telegram
@@ -407,15 +418,41 @@ export async function routeGamePhoto(request, env, helpers = {}) {
 
   const photoMatch = url.pathname.match(/^\/game\/photo\/([0-9a-f-]{36}\.(?:jpg|png|webp))$/i);
   if ((request.method === "GET" || request.method === "HEAD") && photoMatch) {
-    if (!env.GAME_PHOTOS || typeof env.GAME_PHOTOS.get !== "function") return new Response("Photo storage unavailable", { status: 503, headers: corsHeaders(request) });
-    const object = await env.GAME_PHOTOS.get(`shared/${photoMatch[1].toLowerCase()}`);
+    const [photoId, extension] = photoMatch[1].toLowerCase().split(".");
+    const row = await env.DB.prepare(`SELECT storage_key,content_type FROM game_photos WHERE photo_id=? LIMIT 1`).bind(photoId).first();
+    const legacyKey = `shared/${photoMatch[1].toLowerCase()}`;
+    const object = row?.storage_key
+      ? await getStoredImage(env, row.storage_key)
+      : await getStoredImage(env, legacyKey);
     if (!object) return new Response("Not Found", { status: 404, headers: corsHeaders(request) });
     const headers = new Headers(corsHeaders(request));
     object.writeHttpMetadata(headers);
     headers.set("ETag", object.httpEtag);
+    headers.set("Content-Type", row?.content_type || imageContentTypeForExtension(extension) || "application/octet-stream");
     headers.set("Cache-Control", "public, max-age=31536000, immutable");
     headers.set("X-Content-Type-Options", "nosniff");
     return new Response(request.method === "HEAD" ? null : object.body, { status: 200, headers });
+  }
+
+  if (request.method === "DELETE" && photoMatch) {
+    const user = await requireUser(request, env);
+    if (!user) return new Response("Unauthorized", { status: 401, headers: corsHeaders(request) });
+    const photoId = photoMatch[1].split(".", 1)[0].toLowerCase();
+    const row = await env.DB.prepare(`SELECT owner_user_id,storage_key FROM game_photos WHERE photo_id=? LIMIT 1`).bind(photoId).first();
+    if (!row) return json({ ok: false, code: "PHOTO_NOT_FOUND" }, 404, request, corsHeaders);
+    if (String(row.owner_user_id) !== String(user.id)) return json({ ok: false, code: "PHOTO_FORBIDDEN" }, 403, request, corsHeaders);
+    try {
+      await deleteStoredImage(env, row.storage_key);
+      await env.DB.batch([
+        env.DB.prepare(`DELETE FROM game_photo_likes WHERE photo_id=?`).bind(photoId),
+        env.DB.prepare(`DELETE FROM game_photo_telegram_deliveries WHERE photo_id=?`).bind(photoId),
+        env.DB.prepare(`DELETE FROM game_photos WHERE photo_id=?`).bind(photoId)
+      ]);
+    } catch (error) {
+      console.error("[GAME PHOTO DELETE ERROR]", { photo_id: photoId, code: String(error?.message || error) });
+      return json({ ok: false, code: "PHOTO_DELETE_FAILED" }, 500, request, corsHeaders);
+    }
+    return json({ ok: true, photo_id: photoId }, 200, request, corsHeaders);
   }
 
   return null;

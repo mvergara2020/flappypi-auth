@@ -6,11 +6,14 @@ import {
 import { routeDailyRewards } from "./daily-rewards.worker.js";
 import { routeGamePhoto } from "./game-photo.worker.js";
 import { consumeTelegramPhotoBatch, isTelegramPhotoBatch } from "./telegram-photo.worker.js";
+import { isGuestLoginAllowedRequest } from "./guest-login-policy.js";
 
-//const FRONTEND_ORIGIN = "http://localhost:3000";
-const FRONTEND_ORIGIN = "http://192.168.1.81:3000";
-//var FRONTEND_ORIGIN = "https://qa.classic.flappypi.com";
-//var FRONTEND_ORIGIN = "https://classic.flappypi.com";
+function frontendOrigin(env) {
+  const environment = String(env?.ENV || "").trim().toLowerCase();
+  if (environment === "dev") return "https://192.168.1.81:3000";
+  if (environment === "qa") return "https://qa.classic.flappypi.com";
+  return "https://classic.flappypi.com";
+}
 const allowedColors = ["yellow", "red", "diamond", "black", "dragon-green", "dragon-blue", "dragon-red", "dragon-black"];
 const BASE_BIRDS = ["yellow", "red", "diamond", "black"];
 
@@ -2035,7 +2038,7 @@ function corsHeaders(request) {
     "Access-Control-Allow-Origin": origin,
     "Access-Control-Allow-Credentials": "true",
     "Access-Control-Allow-Headers": "Content-Type, X-CSRF",
-    "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
+    "Access-Control-Allow-Methods": "GET,POST,DELETE,OPTIONS",
     "Vary": "Origin",
   };
 }
@@ -2757,7 +2760,7 @@ export default {
           //"Set-Cookie": `session=${jwt}; HttpOnly; SameSite=None; Secure; Path=/`,
           //"Set-Cookie": `session=${jwt}; HttpOnly; SameSite=None; Secure; Path=/; Max-Age=2592000`,
           "Set-Cookie": `session=${jwt}; ${cookieFlags}`,
-          "Location": FRONTEND_ORIGIN,
+          "Location": frontendOrigin(env),
         },
       });
     }
@@ -4104,6 +4107,20 @@ if (
     if (url.pathname === "/auth/guest-login" && request.method === "POST") {
       try {
 
+        if (!isGuestLoginAllowedRequest(request, env)) {
+          return new Response(JSON.stringify({
+            ok: false,
+            code: "GUEST_LOGIN_LOCALHOST_ONLY"
+          }), {
+            status: 403,
+            headers: {
+              ...corsHeaders(request),
+              "Content-Type": "application/json; charset=utf-8",
+              "Cache-Control": "no-store"
+            }
+          });
+        }
+
         let body = {};
         try {
           body = await request.json();
@@ -4251,7 +4268,7 @@ if (
           // borrar cookie
           "Set-Cookie": "session=; HttpOnly; SameSite=None; Path=/; Max-Age=0",
           // volver al frontend
-          "Location": FRONTEND_ORIGIN
+          "Location": frontendOrigin(env)
         },
       });
     }
@@ -5761,7 +5778,6 @@ if (game.id !== "legacy") {
         }
     
         const WELCOME_EGGS = 4000;
-        const WELCOME_SHIELD = 0;
         const WELCOME_SPIN = 5;
     
         // 2. Actualizar usuario
@@ -5769,20 +5785,18 @@ if (game.id !== "legacy") {
           UPDATE users
           SET 
             eggs = eggs + ?,
-            hearts = hearts + ?,
             free_spins = free_spins + ?,
             welcome_claimed = TRUE
           WHERE id = ?
         `).bind(
           WELCOME_EGGS,
-          WELCOME_SHIELD,
           WELCOME_SPIN,
           user.id
         ).run();
     
         // 3. Leer estado actualizado
         const updatedUser = await env.DB.prepare(`
-          SELECT eggs, hearts FROM users WHERE id = ?
+          SELECT eggs, hearts, free_spins FROM users WHERE id = ?
         `).bind(user.id).first();
     
         for (let i = 0; i < WELCOME_SPIN; i++) {
@@ -5798,8 +5812,9 @@ if (game.id !== "legacy") {
             success: true,
             eggs: updatedUser.eggs,
             hearts: updatedUser.hearts,
+            free_spins: updatedUser.free_spins,
             added: WELCOME_EGGS,
-            added_hearts: WELCOME_SHIELD,
+            added_hearts: 0,
             added_spin: WELCOME_SPIN
           }),
           {

@@ -101,6 +101,7 @@ export default {
         has_queue:!!env?.GAME_POINTS_QUEUE,
         has_telegram_photo_queue:!!env?.TELEGRAM_PHOTO_QUEUE,
         has_r2:!!env?.GAME_PHOTOS,
+        has_images_bucket:!!env?.IMAGES_BUCKET,
         telegram_environment:env?.PHOTO_TELEGRAM_ENV||null,
         telegram_enabled:String(env?.TELEGRAM_ENABLED||"").toLowerCase()==="true",
         telegram_local_enabled:String(env?.TELEGRAM_LOCAL_ENABLED||"").toLowerCase()==="true",

@@ -112,15 +112,25 @@ const LEGACY_RANK_META = [
 export const MAX_RANK_LEVEL = 999;
 
 const EARLY_RANK_GAPS = Object.freeze({
-  2: 100,
-  3: 150,
-  4: 220,
-  5: 320,
-  6: 450,
-  7: 600,
-  8: 800,
-  9: 1050,
-  10: 1350
+  2: 3,
+  3: 6,
+  4: 9,
+  5: 12,
+  6: 15,
+  7: 18,
+  8: 24,
+  9: 30,
+  10: 36,
+  11: 45,
+  12: 50,
+  13: 55,
+  14: 60,
+  15: 65,
+  16: 70,
+  17: 75,
+  18: 80,
+  19: 85,
+  20: 90
 });
 
 const GENERATED_RANK_FAMILIES = Object.freeze([
@@ -136,46 +146,38 @@ const GENERATED_RANK_FAMILIES = Object.freeze([
   { from: 950, icon: "👑", name: "Flappy Ascendant" }
 ]);
 
-function roundRankStars(value) {
-  return Math.round(Number(value || 0) / 50) * 50;
-}
-
 function interpolateRankGap(rank,from,to,minGap,maxGap) {
   const progress = (rank - from) / Math.max(1,to - from);
-  return roundRankStars(minGap + (maxGap - minGap) * progress);
+  return Math.round(minGap + (maxGap - minGap) * progress);
 }
 
 export function getStarsGapForRank(rankNumber) {
   const rank = Math.max(1,Math.min(MAX_RANK_LEVEL,Number(rankNumber) || 1));
 
   if (rank <= 1) return 0;
-  if (rank <= 10) return EARLY_RANK_GAPS[rank];
-
-  if (rank <= 20) {
-    return 1600 + (rank - 11) * 300;
-  }
+  if (rank <= 20) return EARLY_RANK_GAPS[rank];
 
   if (rank <= 50) {
-    return interpolateRankGap(rank,21,50,4500,6000);
+    return interpolateRankGap(rank,21,50,100,250);
   }
 
   if (rank <= 100) {
-    return interpolateRankGap(rank,51,100,6000,8000);
+    return interpolateRankGap(rank,51,100,250,500);
   }
 
   if (rank <= 300) {
-    return interpolateRankGap(rank,101,300,8000,12000);
+    return interpolateRankGap(rank,101,300,500,1200);
   }
 
   if (rank <= 600) {
-    return interpolateRankGap(rank,301,600,12000,15000);
+    return interpolateRankGap(rank,301,600,1200,2500);
   }
 
   if (rank <= 900) {
-    return interpolateRankGap(rank,601,900,15000,19000);
+    return interpolateRankGap(rank,601,900,2500,4000);
   }
 
-  return interpolateRankGap(rank,901,999,19000,23000);
+  return interpolateRankGap(rank,901,999,4000,6000);
 }
 
 function getGeneratedRankMeta(rank) {

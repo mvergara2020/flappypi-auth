@@ -1,4 +1,5 @@
 import { getRankBundle } from "./levels.js";
+import { imageExtensionForContentType } from "./media-storage.worker.js";
 
 const PRO_PRICE_USD_CENTS = 350;
 const FACE_PRICE_USD_CENTS = 50;
@@ -1333,7 +1334,7 @@ async function routePhotos(request, env, helpers, url, user) {
     const gameType = normalizeGameId(url.searchParams.get("game_type") || "flappy_classic") || "flappy_classic";
     const limit = Math.max(1, Math.min(30, Number(url.searchParams.get("limit") || 6)));
     const rows = await env.DB.prepare(`
-      SELECT p.photo_id,p.owner_user_id,p.game_type,p.stage,p.total_points,p.storage_key,p.created_at,p.views,p.likes,
+      SELECT p.photo_id,p.owner_user_id,p.game_type,p.stage,p.total_points,p.storage_key,p.content_type,p.created_at,p.views,p.likes,
              u.user_name,u.name,
              EXISTS(SELECT 1 FROM game_photo_likes l WHERE l.photo_id=p.photo_id AND l.user_id=?) AS liked
       FROM game_photos p
@@ -1357,7 +1358,7 @@ async function routePhotos(request, env, helpers, url, user) {
         liked: Number(row.liked || 0) === 1,
         user_name: row.user_name,
         name: row.name,
-        url: `${url.origin}/game/photo/${String(row.storage_key).replace(/^shared\//, "")}`
+        url: `${url.origin}/game/photo/${row.photo_id}.${imageExtensionForContentType(row.content_type) || "jpg"}`
       }))
     }, 200, request, corsHeaders);
   }

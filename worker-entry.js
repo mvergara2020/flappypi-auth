@@ -7,7 +7,9 @@ const CURRENT_GAME_STATS_SEASON_ID = "S5";
 const GAME_TOP_CACHE_TTL_MS = 30000;
 const GAME_TOP_TYPES = new Set([
   "flappy_classic", "webcam_flappy", "finger_trace", "fruits_memory",
-  "snake_999", "jelly_fusion", "tetriz_999", "flappypi_999", "fusion_999"
+  "snake_999", "jelly_fusion", "tetriz_999", "flappypi_999", "fusion_999",
+  "pollito_lanzador_2d_retro", "pollito_lanzador_3d", "sumas_arcade",
+  "finger_shape_precision", "slice_percent", "ninja_chicken_999"
 ]);
 const gameTopMemoryCache = new Map();
 const ALLOWED_ORIGINS = new Set([

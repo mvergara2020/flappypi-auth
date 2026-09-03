@@ -88,3 +88,7 @@ dead_letter_queue = "flappypi-photo-telegram-testnet-dlq"
 [[env.qa.r2_buckets]]
 binding = "GAME_PHOTOS"
 bucket_name = "flappypi-game-photos-qa"
+
+[[env.qa.r2_buckets]]
+binding = "IMAGES_BUCKET"
+bucket_name = "flappypi-images-qa"

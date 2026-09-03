@@ -1,7 +1,7 @@
 import baseWorker from "./worker-fast-entry.js";
 import { routeSponsors } from "./sponsor.worker.js";
 
-const MAX_SHARED_IMAGE_BYTES = 300 * 1024;
+const MAX_SHARED_IMAGE_BYTES = 5 * 1024 * 1024;
 const ALLOWED_ORIGINS = new Set([
   "http://localhost:3000",
   "http://127.0.0.1:3000",
@@ -69,7 +69,7 @@ function tooLarge(request, actualBytes = null) {
     ok: false,
     code: "IMAGE_UPLOAD_TOO_LARGE",
     max_bytes: MAX_SHARED_IMAGE_BYTES,
-    max_kb: 300,
+    max_kb: 5120,
     actual_bytes: actualBytes
   }, 413);
 }

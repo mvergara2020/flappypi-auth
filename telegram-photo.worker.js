@@ -1,3 +1,5 @@
+import { getStoredImage } from "./media-storage.worker.js";
+
 const TELEGRAM_JOB_KIND = "game-photo-telegram-v1";
 const TELEGRAM_CAPTION_MAX_CHARS = 1024;
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "0.0.0.0", "::1"]);
@@ -308,7 +310,7 @@ async function loadPhoto(env, photoId) {
 }
 
 async function sendPhotoToTelegram(env, config, row, environment) {
-  const object = await env.GAME_PHOTOS.get(row.storage_key);
+  const object = await getStoredImage(env, row.storage_key);
   if (!object) {
     const error = new Error("PHOTO_OBJECT_NOT_FOUND");
     error.permanent = true;
@@ -376,7 +378,7 @@ async function processTelegramMessage(message, env) {
   }
 
   const config = telegramConfig(env, environment);
-  if (!config.enabled || !config.token || !config.chatId || !env?.GAME_PHOTOS) {
+  if (!config.enabled || !config.token || !config.chatId || (!env?.GAME_PHOTOS && !env?.IMAGES_BUCKET)) {
     await updateDelivery(env, photoId, environment, {
       status: "configuration_missing",
       last_error: "Telegram consumer configuration is incomplete"
